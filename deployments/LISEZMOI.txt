@@ -1,0 +1,2 @@
+Les scripts de déploiement écrivent ici les adresses des contrats déployés, dans un fichier par réseau :
+31337.json pour la blockchain locale (anvil), 11155111.json pour Sepolia. Voir DEPLOIEMENT.md.

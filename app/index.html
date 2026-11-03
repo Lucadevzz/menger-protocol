@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Menger, démo</title>
+  <meta name="description" content="Une monnaie stable en or, sans réserve ni émetteur : 1 Menger = 3,545 g d'or fin. Démo sur un réseau de test.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23B8892B'/%3E%3Ccircle cx='16' cy='16' r='10.5' fill='none' stroke='%23F7E7B4' stroke-width='1.5' stroke-dasharray='1.6 1.6'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <p class="banner" id="banner"></p>
+
+  <header class="top wrap">
+    <div class="brand">
+      <svg class="coin" viewBox="0 0 32 32" aria-hidden="true">
+        <circle cx="16" cy="16" r="14.5" class="coin-face"/>
+        <circle cx="16" cy="16" r="11" class="coin-mill"/>
+        <circle cx="16" cy="16" r="7.5" class="coin-inner"/>
+      </svg>
+      <span class="brand-name" id="brandName">Menger</span>
+    </div>
+    <div class="top-actions">
+      <div class="lang" role="group" data-i18n-aria="lang.label" aria-label="Langue">
+        <button type="button" data-lang="fr">FR</button>
+        <button type="button" data-lang="en">EN</button>
+      </div>
+      <span class="network" id="networkChip"></span>
+      <button type="button" class="btn btn-primary" id="connectBtn"></button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero" aria-labelledby="heroTitle">
+      <h1 id="heroTitle" class="equation">
+        <span class="eq-unit" id="heroUnit"></span>
+        <span class="eq-weight" id="heroWeight"></span>
+        <span class="eq-fine" id="heroFine"></span>
+      </h1>
+      <p class="hero-today" id="heroToday"></p>
+      <p class="hero-how" id="heroHow"></p>
+      <p class="notice" id="globalNotice" role="status" hidden></p>
+    </section>
+
+    <div class="grid">
+      <section class="panel" id="accountPanel" aria-labelledby="accountTitle">
+        <h2 id="accountTitle" data-i18n="account.title"></h2>
+
+        <div id="accountDisconnected">
+          <p class="muted" id="accountHint"></p>
+        </div>
+
+        <div id="accountConnected" hidden>
+          <table class="ledger balances">
+            <tbody>
+              <tr><th scope="row" id="balEthLabel">ETH</th><td id="balEth"></td></tr>
+              <tr><th scope="row" id="balTokLabel"></th><td id="balTok"></td></tr>
+            </tbody>
+          </table>
+          <p class="small links-row">
+            <button type="button" class="link" id="watchBtn"></button>
+          </p>
+          <p class="form-status" id="accountStatus" aria-live="polite"></p>
+          <p class="small muted" id="faucetRow" hidden>
+            <span data-i18n="account.faucet"></span>
+            <a href="https://cloud.google.com/application/web3/faucet/ethereum/sepolia" target="_blank" rel="noopener">Google Cloud</a>,
+            <a href="https://www.alchemy.com/faucets/ethereum-sepolia" target="_blank" rel="noopener">Alchemy</a>
+          </p>
+
+          <div class="surplus" id="surplusBox" hidden>
+            <p id="surplusText"></p>
+            <button type="button" class="btn" id="surplusBtn" data-i18n="surplus.button"></button>
+            <p class="form-status" id="surplusStatus" aria-live="polite"></p>
+          </div>
+
+          <div class="tabs" role="tablist" data-i18n-aria="tabs.label" aria-label="Actions">
+            <button type="button" role="tab" id="tab-borrow" aria-controls="pane-borrow" aria-selected="true" data-i18n="tabs.borrow"></button>
+            <button type="button" role="tab" id="tab-pool" aria-controls="pane-pool" aria-selected="false" data-i18n="tabs.pool"></button>
+            <button type="button" role="tab" id="tab-redeem" aria-controls="pane-redeem" aria-selected="false" data-i18n="tabs.redeem"></button>
+          </div>
+
+          <!-- Borrow -->
+          <div class="pane" role="tabpanel" id="pane-borrow" aria-labelledby="tab-borrow">
+            <form id="openForm" class="form" novalidate hidden>
+              <div class="field">
+                <label for="openColl" data-i18n="open.coll"></label>
+                <div class="input-unit"><input id="openColl" inputmode="decimal" autocomplete="off" placeholder="0"><span>ETH</span></div>
+              </div>
+              <div class="field">
+                <label for="openAmount" data-i18n="open.amount"></label>
+                <div class="input-unit"><input id="openAmount" inputmode="decimal" autocomplete="off" placeholder="0"><span class="sym"></span></div>
+              </div>
+              <p class="small muted" id="openHelp"></p>
+              <p class="small warn" id="openRecovery" data-i18n="open.recovery" hidden></p>
+              <table class="ledger preview">
+                <tbody>
+                  <tr><th scope="row" id="openFeeLabel"></th><td id="openFee">–</td></tr>
+                  <tr><th scope="row" data-i18n="open.reserve"></th><td id="openReserve">–</td></tr>
+                  <tr><th scope="row" data-i18n="open.debt"></th><td id="openDebt">–</td></tr>
+                  <tr><th scope="row" data-i18n="open.ratio"></th><td id="openRatio">–</td></tr>
+                  <tr><th scope="row" data-i18n="open.liq"></th><td id="openLiq">–</td></tr>
+                </tbody>
+              </table>
+              <button type="submit" class="btn btn-primary" id="openBtn" data-i18n="open.button"></button>
+              <p class="form-status" id="openStatus" aria-live="polite"></p>
+            </form>
+
+            <div id="troveView" hidden>
+              <h3 data-i18n="trove.title"></h3>
+              <p class="form-status" id="troveStatus" aria-live="polite"></p>
+              <table class="ledger">
+                <tbody>
+                  <tr><th scope="row" data-i18n="trove.debt"></th><td id="troveDebt"></td></tr>
+                  <tr><th scope="row" data-i18n="trove.coll"></th><td id="troveColl"></td></tr>
+                  <tr><th scope="row" data-i18n="trove.ratio"></th><td id="troveRatio"></td></tr>
+                  <tr><th scope="row" data-i18n="trove.liq"></th><td id="troveLiq"></td></tr>
+                </tbody>
+              </table>
+              <div class="meter" id="troveMeter" aria-hidden="true">
+                <div class="meter-track">
+                  <span class="zone zone-danger"></span><span class="zone zone-warn"></span><span class="zone zone-safe"></span>
+                  <span class="meter-mark" id="meterMark"></span>
+                </div>
+                <div class="meter-labels"><span class="m-liq" data-i18n="meter.liq"></span><span class="m-ccr" data-i18n="meter.ccr"></span></div>
+              </div>
+              <p class="small muted meter-note" data-i18n="meter.note"></p>
+              <p class="small warn" id="troveRecovery" hidden></p>
+
+              <form id="adjustForm" class="form" novalidate>
+                <h3 data-i18n="adjust.title"></h3>
+                <div class="segmented" role="radiogroup" data-i18n-aria="adjust.op" aria-label="Opération">
+                  <label><input type="radio" name="adj" value="add" checked><span data-i18n="adjust.add"></span></label>
+                  <label><input type="radio" name="adj" value="withdraw"><span data-i18n="adjust.withdraw"></span></label>
+                  <label><input type="radio" name="adj" value="borrow"><span data-i18n="adjust.borrow"></span></label>
+                  <label><input type="radio" name="adj" value="repay"><span data-i18n="adjust.repay"></span></label>
+                </div>
+                <div class="field">
+                  <label for="adjAmount" data-i18n="adjust.amount"></label>
+                  <div class="input-unit"><input id="adjAmount" inputmode="decimal" autocomplete="off" placeholder="0"><span id="adjUnit">ETH</span></div>
+                </div>
+                <p class="small muted" id="adjHelp" hidden></p>
+                <table class="ledger preview">
+                  <tbody>
+                    <tr id="adjFeeRow" hidden><th scope="row" data-i18n="adjust.fee"></th><td id="adjFee"></td></tr>
+                    <tr><th scope="row" data-i18n="adjust.newDebt"></th><td id="adjDebt">–</td></tr>
+                    <tr><th scope="row" data-i18n="adjust.newRatio"></th><td id="adjRatio">–</td></tr>
+                  </tbody>
+                </table>
+                <button type="submit" class="btn btn-primary" id="adjBtn"></button>
+                <p class="form-status" id="adjStatus" aria-live="polite"></p>
+              </form>
+
+              <div class="form close-box">
+                <h3 data-i18n="close.title"></h3>
+                <p id="closeText"></p>
+                <p class="small warn" id="closeBlocked" hidden></p>
+                <button type="button" class="btn btn-quiet" id="closeBtn" data-i18n="close.button"></button>
+                <p class="form-status" id="closeStatus" aria-live="polite"></p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Stability Pool -->
+          <div class="pane" role="tabpanel" id="pane-pool" aria-labelledby="tab-pool" hidden>
+            <p class="muted" id="poolIntro"></p>
+            <table class="ledger">
+              <tbody>
+                <tr><th scope="row" data-i18n="pool.deposit"></th><td id="poolDeposit"></td></tr>
+                <tr><th scope="row" data-i18n="pool.ethGain"></th><td id="poolEthGain"></td></tr>
+                <tr><th scope="row" id="poolFeeGainLabel"></th><td id="poolFeeGain"></td></tr>
+              </tbody>
+            </table>
+            <form id="poolForm" class="form" novalidate>
+              <div class="field">
+                <label for="poolAmount" data-i18n="pool.amount"></label>
+                <div class="input-unit"><input id="poolAmount" inputmode="decimal" autocomplete="off" placeholder="0"><span class="sym"></span></div>
+              </div>
+              <p class="small muted pool-max">
+                <button type="button" class="link" id="poolMaxDeposit"></button>
+                <button type="button" class="link" id="poolMaxWithdraw"></button>
+              </p>
+              <p class="small warn" id="poolHelp" hidden></p>
+              <p class="small muted" id="poolMinWarn" hidden></p>
+              <div class="btn-row">
+                <button type="submit" class="btn btn-primary" id="poolDepositBtn" data-i18n="pool.depositBtn"></button>
+                <button type="button" class="btn" id="poolWithdrawBtn" data-i18n="pool.withdrawBtn"></button>
+              </div>
+              <div class="btn-row">
+                <button type="button" class="btn" id="poolClaimBtn" data-i18n="pool.claimBtn"></button>
+                <button type="button" class="btn" id="poolToTroveBtn" data-i18n="pool.toTroveBtn"></button>
+              </div>
+              <p class="form-status" id="poolStatus" aria-live="polite"></p>
+            </form>
+          </div>
+
+          <!-- Redeem -->
+          <div class="pane" role="tabpanel" id="pane-redeem" aria-labelledby="tab-redeem" hidden>
+            <p class="muted" id="redeemIntro"></p>
+            <p class="state" id="redeemState"></p>
+            <form id="redeemForm" class="form" novalidate>
+              <div class="field">
+                <label for="redeemAmount" data-i18n="redeem.amount"></label>
+                <div class="input-unit"><input id="redeemAmount" inputmode="decimal" autocomplete="off" placeholder="0"><span class="sym"></span></div>
+              </div>
+              <table class="ledger preview">
+                <tbody>
+                  <tr><th scope="row" data-i18n="redeem.fee"></th><td id="redeemFee">–</td></tr>
+                  <tr><th scope="row" data-i18n="redeem.receive"></th><td id="redeemReceive">–</td></tr>
+                </tbody>
+              </table>
+              <p class="small warn" id="redeemTruncated" hidden></p>
+              <button type="submit" class="btn btn-primary" id="redeemBtn" data-i18n="redeem.button"></button>
+              <p class="form-status" id="redeemStatus" aria-live="polite"></p>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <aside class="side">
+        <section class="panel" aria-labelledby="systemTitle">
+          <h2 id="systemTitle" data-i18n="system.title"></h2>
+          <table class="ledger" id="systemTable">
+            <tbody>
+              <tr><th scope="row" data-i18n="system.ethUsd"></th><td id="sysEthUsd">–</td></tr>
+              <tr><th scope="row" data-i18n="system.xauUsd"></th><td id="sysXauUsd">–</td></tr>
+              <tr><th scope="row" id="sysUnitUsdLabel"></th><td id="sysUnitUsd">–</td></tr>
+              <tr><th scope="row" data-i18n="system.coll"></th><td id="sysColl">–</td></tr>
+              <tr><th scope="row" data-i18n="system.debt"></th><td id="sysDebt">–</td></tr>
+              <tr><th scope="row" data-i18n="system.tcr"></th><td id="sysTcr">–</td></tr>
+              <tr><th scope="row" data-i18n="system.mode"></th><td id="sysMode">–</td></tr>
+              <tr><th scope="row" data-i18n="system.sp"></th><td id="sysSp">–</td></tr>
+              <tr><th scope="row" data-i18n="system.troves"></th><td id="sysTroves">–</td></tr>
+              <tr><th scope="row" data-i18n="system.borrowRate"></th><td id="sysBorrowRate">–</td></tr>
+              <tr><th scope="row" data-i18n="system.redeemRate"></th><td id="sysRedeemRate">–</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="panel" aria-labelledby="riskyTitle">
+          <h2 id="riskyTitle" data-i18n="risky.title"></h2>
+          <table class="ledger troves" id="riskyTable">
+            <thead><tr><th scope="col" data-i18n="risky.owner"></th><th scope="col" data-i18n="risky.ratio"></th><th scope="col" data-i18n="risky.debt"></th></tr></thead>
+            <tbody id="riskyBody"></tbody>
+          </table>
+          <p class="muted small" id="riskyEmpty" hidden data-i18n="risky.none"></p>
+          <button type="button" class="btn btn-danger" id="liqBtn"></button>
+          <p class="small warn" id="riskyNote" hidden></p>
+          <p class="small muted" data-i18n="risky.note"></p>
+          <p class="form-status" id="liqStatus" aria-live="polite"></p>
+        </section>
+
+        <section class="panel demo" id="demoPanel" aria-labelledby="demoTitle" hidden>
+          <h2 id="demoTitle" data-i18n="demo.title"></h2>
+          <p class="muted" data-i18n="demo.intro"></p>
+          <form id="demoForm" class="form" novalidate>
+            <div class="field">
+              <label for="demoEth" data-i18n="demo.eth"></label>
+              <div class="input-unit"><input id="demoEth" inputmode="decimal" autocomplete="off"><span>$</span></div>
+            </div>
+            <div class="field">
+              <label for="demoXau" data-i18n="demo.xau"></label>
+              <div class="input-unit"><input id="demoXau" inputmode="decimal" autocomplete="off"><span>$</span></div>
+            </div>
+            <div class="btn-row">
+              <button type="button" class="btn btn-quiet" id="demoCrash" data-i18n="demo.crash"></button>
+              <button type="button" class="btn btn-quiet" id="demoGoldUp" data-i18n="demo.goldUp"></button>
+            </div>
+            <p class="small muted" data-i18n="demo.note"></p>
+            <button type="submit" class="btn btn-primary" id="demoPublish" data-i18n="demo.publish"></button>
+            <h3 data-i18n="demo.ages"></h3>
+            <table class="ledger">
+              <tbody id="demoAges"></tbody>
+            </table>
+            <p class="small muted" id="demoRefreshNote"></p>
+            <button type="button" class="btn" id="demoRefresh" data-i18n="demo.refresh"></button>
+            <p class="form-status" id="demoStatus" aria-live="polite"></p>
+          </form>
+        </section>
+      </aside>
+    </div>
+  </main>
+
+  <footer class="foot wrap">
+    <p class="small muted" data-i18n="footer.text"></p>
+    <p class="small"><a id="contractLink" href="#" target="_blank" rel="noopener" hidden data-i18n="footer.contracts"></a></p>
+  </footer>
+
+  <script src="vendor/ethers-6.17.0.umd.min.js"></script>
+  <script src="i18n.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

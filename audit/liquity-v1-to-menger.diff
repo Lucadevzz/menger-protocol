@@ -1,0 +1,1108 @@
+--- liquity-v1/BorrowerOperations.sol
++++ menger-v0/BorrowerOperations.sol
+@@ -7,7 +7,6 @@
+ import "./Interfaces/ILUSDToken.sol";
+ import "./Interfaces/ICollSurplusPool.sol";
+ import "./Interfaces/ISortedTroves.sol";
+-import "./Interfaces/ILQTYStaking.sol";
+ import "./Dependencies/LiquityBase.sol";
+ import "./Dependencies/Ownable.sol";
+ import "./Dependencies/CheckContract.sol";
+@@ -26,8 +25,9 @@
+ 
+     ICollSurplusPool collSurplusPool;
+ 
+-    ILQTYStaking public lqtyStaking;
+-    address public lqtyStakingAddress;
++    // MENGER: no LQTY token. Borrowing fees are minted to the fee distributor (StabilityPoolFeeIssuance),
++    // which passes them on to Stability Pool depositors.
++    address public borrowingFeeRecipient;
+ 
+     ILUSDToken public lusdToken;
+ 
+@@ -87,7 +87,7 @@
+     event PriceFeedAddressChanged(address  _newPriceFeedAddress);
+     event SortedTrovesAddressChanged(address _sortedTrovesAddress);
+     event LUSDTokenAddressChanged(address _lusdTokenAddress);
+-    event LQTYStakingAddressChanged(address _lqtyStakingAddress);
++    event BorrowingFeeRecipientChanged(address _borrowingFeeRecipient);
+ 
+     event TroveCreated(address indexed _borrower, uint arrayIndex);
+     event TroveUpdated(address indexed _borrower, uint _debt, uint _coll, uint stake, BorrowerOperation operation);
+@@ -105,7 +105,7 @@
+         address _priceFeedAddress,
+         address _sortedTrovesAddress,
+         address _lusdTokenAddress,
+-        address _lqtyStakingAddress
++        address _borrowingFeeRecipient
+     )
+         external
+         override
+@@ -123,7 +123,7 @@
+         checkContract(_priceFeedAddress);
+         checkContract(_sortedTrovesAddress);
+         checkContract(_lusdTokenAddress);
+-        checkContract(_lqtyStakingAddress);
++        checkContract(_borrowingFeeRecipient);
+ 
+         troveManager = ITroveManager(_troveManagerAddress);
+         activePool = IActivePool(_activePoolAddress);
+@@ -134,8 +134,7 @@
+         priceFeed = IPriceFeed(_priceFeedAddress);
+         sortedTroves = ISortedTroves(_sortedTrovesAddress);
+         lusdToken = ILUSDToken(_lusdTokenAddress);
+-        lqtyStakingAddress = _lqtyStakingAddress;
+-        lqtyStaking = ILQTYStaking(_lqtyStakingAddress);
++        borrowingFeeRecipient = _borrowingFeeRecipient;
+ 
+         emit TroveManagerAddressChanged(_troveManagerAddress);
+         emit ActivePoolAddressChanged(_activePoolAddress);
+@@ -146,7 +145,7 @@
+         emit PriceFeedAddressChanged(_priceFeedAddress);
+         emit SortedTrovesAddressChanged(_sortedTrovesAddress);
+         emit LUSDTokenAddressChanged(_lusdTokenAddress);
+-        emit LQTYStakingAddressChanged(_lqtyStakingAddress);
++        emit BorrowingFeeRecipientChanged(_borrowingFeeRecipient);
+ 
+         _renounceOwnership();
+     }
+@@ -366,9 +365,8 @@
+ 
+         _requireUserAcceptsFee(LUSDFee, _LUSDAmount, _maxFeePercentage);
+         
+-        // Send fee to LQTY staking contract
+-        lqtyStaking.increaseF_LUSD(LUSDFee);
+-        _lusdToken.mint(lqtyStakingAddress, LUSDFee);
++        // MENGER: send the fee to the Stability Pool fee distributor (it was the LQTY staking contract in Liquity V1)
++        _lusdToken.mint(borrowingFeeRecipient, LUSDFee);
+ 
+         return LUSDFee;
+     }
+--- liquity-v1/LUSDToken.sol
++++ menger-v0/LUSDToken.sol
+@@ -28,8 +28,10 @@
+     using SafeMath for uint256;
+     
+     uint256 private _totalSupply;
+-    string constant internal _NAME = "LUSD Stablecoin";
+-    string constant internal _SYMBOL = "LUSD";
++    // MENGER: token renamed (provisional name). Internal identifiers keep the "LUSD" prefix on purpose,
++    // so that auditors can compare this code line by line with the audited Liquity V1 code.
++    string constant internal _NAME = "Menger";
++    string constant internal _SYMBOL = "MNGR";
+     string constant internal _VERSION = "1";
+     uint8 constant internal _DECIMALS = 18;
+     
+--- liquity-v1/StabilityPool.sol
++++ menger-v0/StabilityPool.sol
+@@ -16,6 +16,21 @@
+ //import "./Dependencies/console.sol";
+ 
+ /*
++ * MENGER: there is no LQTY token. Everything this contract calls "LQTY" (sum G, getDepositorLQTYGain,
++ * communityIssuance, LQTYPaidToDepositor...) now refers to the borrowing fees, paid in Mengers, that
++ * StabilityPoolFeeIssuance hands to the pool. Names are kept so the code can be compared line by line
++ * with Liquity V1.
++ *
++ * Redemption fees (in ETH) are received through distributeRedemptionFee(). Like the borrowing fees, they are
++ * released to depositors gradually: at each pool operation, the part of the pending fees that matches the time
++ * elapsed is added to the ETH gains (sum S), so a deposit made just before a fee and withdrawn just after
++ * captures almost nothing of it. See _releaseRedemptionFees().
++ *
++ * ETH gains are paid through _cappedETHGain(): rounding in the sums can make the gains add up to a few wei more
++ * than the ETH held for them, and the cap keeps the last withdrawal from reverting.
++ */
++
++/*
+  * The Stability Pool holds LUSD tokens deposited by Stability Pool depositors.
+  *
+  * When a trove is liquidated, then depending on system conditions, some of its LUSD debt gets offset with
+@@ -219,6 +234,17 @@
+     uint public lastETHError_Offset;
+     uint public lastLUSDLossError_Offset;
+ 
++    // --- MENGER: redemption fees, released gradually ---
++
++    // Each release hands over (time elapsed / FEE_RELEASE_PERIOD) of the pending fees, or all of them.
++    // Same period as the borrowing fees (StabilityPoolFeeIssuance).
++    uint constant public FEE_RELEASE_PERIOD = 7 days;
++
++    // Redemption fees received (they are part of ETH) and not yet added to depositors' ETH gains
++    uint public pendingRedemptionFeeETH;
++
++    uint public lastRedemptionFeeReleaseTime;
++
+     // --- Events ---
+ 
+     event StabilityPoolETHBalanceUpdated(uint _newBalance);
+@@ -246,6 +272,9 @@
+     event UserDepositChanged(address indexed _depositor, uint _newDeposit);
+     event FrontEndStakeChanged(address indexed _frontEnd, uint _newFrontEndStake, address _depositor);
+ 
++    event RedemptionFeeReceived(uint _ETHFee, uint _pendingRedemptionFeeETH);
++    event RedemptionFeeReleased(uint _ETHReleased, uint _pendingRedemptionFeeETH);
++
+     event ETHGainWithdrawn(address indexed _depositor, uint _ETH, uint _LUSDLoss);
+     event LQTYPaidToDepositor(address indexed _depositor, uint _LQTY);
+     event LQTYPaidToFrontEnd(address indexed _frontEnd, uint _LQTY);
+@@ -281,6 +310,7 @@
+         sortedTroves = ISortedTroves(_sortedTrovesAddress);
+         priceFeed = IPriceFeed(_priceFeedAddress);
+         communityIssuance = ICommunityIssuance(_communityIssuanceAddress);
++        lastRedemptionFeeReleaseTime = block.timestamp;
+ 
+         emit BorrowerOperationsAddressChanged(_borrowerOperationsAddress);
+         emit TroveManagerAddressChanged(_troveManagerAddress);
+@@ -325,7 +355,7 @@
+         _triggerLQTYIssuance(communityIssuanceCached);
+ 
+         if (initialDeposit == 0) {_setFrontEndTag(msg.sender, _frontEndTag);}
+-        uint depositorETHGain = getDepositorETHGain(msg.sender);
++        uint depositorETHGain = _cappedETHGain(getDepositorETHGain(msg.sender)); // MENGER: capped
+         uint compoundedLUSDDeposit = getCompoundedLUSDDeposit(msg.sender);
+         uint LUSDLoss = initialDeposit.sub(compoundedLUSDDeposit); // Needed only for event log
+ 
+@@ -369,7 +399,7 @@
+ 
+         _triggerLQTYIssuance(communityIssuanceCached);
+ 
+-        uint depositorETHGain = getDepositorETHGain(msg.sender);
++        uint depositorETHGain = _cappedETHGain(getDepositorETHGain(msg.sender)); // MENGER: capped
+ 
+         uint compoundedLUSDDeposit = getCompoundedLUSDDeposit(msg.sender);
+         uint LUSDtoWithdraw = LiquityMath._min(_amount, compoundedLUSDDeposit);
+@@ -381,7 +411,9 @@
+         
+         // Update front end stake
+         uint compoundedFrontEndStake = getCompoundedFrontEndStake(frontEnd);
+-        uint newFrontEndStake = compoundedFrontEndStake.sub(LUSDtoWithdraw);
++        // MENGER: saturating subtraction. Rounding can leave a front end's compounded stake 1 wei below the deposits
++        // tagged with it; the last tagged depositor's full withdrawal then reverted, locking that wei (found by fuzzing).
++        uint newFrontEndStake = compoundedFrontEndStake > LUSDtoWithdraw ? compoundedFrontEndStake - LUSDtoWithdraw : 0;
+         _updateFrontEndStakeAndSnapshots(frontEnd, newFrontEndStake);
+         emit FrontEndStakeChanged(frontEnd, newFrontEndStake, msg.sender);
+ 
+@@ -409,13 +441,15 @@
+         uint initialDeposit = deposits[msg.sender].initialValue;
+         _requireUserHasDeposit(initialDeposit);
+         _requireUserHasTrove(msg.sender);
+-        _requireUserHasETHGain(msg.sender);
+ 
+         ICommunityIssuance communityIssuanceCached = communityIssuance;
+ 
+         _triggerLQTYIssuance(communityIssuanceCached);
+ 
+-        uint depositorETHGain = getDepositorETHGain(msg.sender);
++        // MENGER: checked after the trigger, which may release redemption fees into the ETH gains
++        _requireUserHasETHGain(msg.sender);
++
++        uint depositorETHGain = _cappedETHGain(getDepositorETHGain(msg.sender)); // MENGER: capped
+ 
+         uint compoundedLUSDDeposit = getCompoundedLUSDDeposit(msg.sender);
+         uint LUSDLoss = initialDeposit.sub(compoundedLUSDDeposit); // Needed only for event log
+@@ -450,6 +484,8 @@
+     function _triggerLQTYIssuance(ICommunityIssuance _communityIssuance) internal {
+         uint LQTYIssuance = _communityIssuance.issueLQTY();
+        _updateG(LQTYIssuance);
++        // MENGER: at the same moments (every deposit, withdrawal and liquidation), release redemption fees
++        _releaseRedemptionFees();
+     }
+ 
+     function _updateG(uint _LQTYIssuance) internal {
+@@ -526,6 +562,68 @@
+         _moveOffsetCollAndDebt(_collToAdd, _debtToOffset);
+     }
+ 
++    // --- MENGER: redemption fees ---
++
++    /*
++    * MENGER: receives a redemption fee (in ETH), which went to LQTY stakers in Liquity V1. The ETH has already been
++    * received from the ActivePool (see receive()). The fee becomes pending and is released to depositors gradually.
++    * What had already been due before this fee arrived is released first, so the new fee starts from zero.
++    */
++    function distributeRedemptionFee(uint _ETHFee) external override {
++        _requireCallerIsTroveManager();
++        _releaseRedemptionFees();
++
++        uint newPending = pendingRedemptionFeeETH.add(_ETHFee);
++        pendingRedemptionFeeETH = newPending;
++        emit RedemptionFeeReceived(_ETHFee, newPending);
++    }
++
++    /*
++    * MENGER: adds to the depositors' ETH gains the part of the pending redemption fees that matches the time
++    * elapsed since the last release (all of them once FEE_RELEASE_PERIOD has passed), pro rata to the current
++    * compounded deposits. While the pool holds no deposits nothing is released, and the fees wait.
++    * Only the reward sum S changes: deposits are not reduced, so the product P does not change.
++    * Uses the same rounding-error feedback as _computeRewardsPerUnitStaked.
++    * The clock always restarts, even when rounding makes the release zero: otherwise a fee that has just
++    * arrived could later be released as if it had been waiting for longer.
++    */
++    function _releaseRedemptionFees() internal {
++        uint elapsed = block.timestamp.sub(lastRedemptionFeeReleaseTime);
++        lastRedemptionFeeReleaseTime = block.timestamp;
++
++        uint pending = pendingRedemptionFeeETH;
++        uint totalLUSD = totalLUSDDeposits; // cached to save an SLOAD
++        if (pending == 0 || elapsed == 0 || totalLUSD == 0) { return; }
++
++        uint released = elapsed >= FEE_RELEASE_PERIOD ? pending : pending.mul(elapsed).div(FEE_RELEASE_PERIOD);
++        if (released == 0) { return; }
++
++        uint newPending = pending.sub(released);
++        pendingRedemptionFeeETH = newPending;
++
++        uint ETHNumerator = released.mul(DECIMAL_PRECISION).add(lastETHError_Offset);
++        uint ETHGainPerUnitStaked = ETHNumerator.div(totalLUSD);
++        lastETHError_Offset = ETHNumerator.sub(ETHGainPerUnitStaked.mul(totalLUSD));
++
++        uint currentScaleCached = currentScale;
++        uint newS = scaleToSum[currentScaleCached].add(ETHGainPerUnitStaked.mul(P));
++        scaleToSum[currentScaleCached] = newS;
++        emit S_Updated(newS, currentScaleCached);
++        emit RedemptionFeeReleased(released, newPending);
++    }
++
++    /*
++    * MENGER: rounding in the sums S and P can make the depositors' ETH gains add up to a few wei more than the ETH
++    * the pool holds for them (the error grows when a large amount is shared over a nearly empty pool). Paying
++    * gains through this cap means the last depositor to withdraw receives that dust less, instead of their
++    * withdrawal reverting. Pending redemption fees are never used to pay gains.
++    */
++    function _cappedETHGain(uint _ETHGain) internal view returns (uint) {
++        uint pending = pendingRedemptionFeeETH;
++        uint available = ETH > pending ? ETH - pending : 0;
++        return LiquityMath._min(_ETHGain, available);
++    }
++
+     // --- Offset helper functions ---
+ 
+     function _computeRewardsPerUnitStaked(
+@@ -966,7 +1064,7 @@
+     }
+ 
+     function _requireUserHasETHGain(address _depositor) internal view {
+-        uint ETHGain = getDepositorETHGain(_depositor);
++        uint ETHGain = _cappedETHGain(getDepositorETHGain(_depositor)); // MENGER: the gain that can actually be paid
+         require(ETHGain > 0, "StabilityPool: caller must have non-zero ETH Gain");
+     }
+ 
+--- liquity-v1/TroveManager.sol
++++ menger-v0/TroveManager.sol
+@@ -7,8 +7,6 @@
+ import "./Interfaces/ICollSurplusPool.sol";
+ import "./Interfaces/ILUSDToken.sol";
+ import "./Interfaces/ISortedTroves.sol";
+-import "./Interfaces/ILQTYToken.sol";
+-import "./Interfaces/ILQTYStaking.sol";
+ import "./Dependencies/LiquityBase.sol";
+ import "./Dependencies/Ownable.sol";
+ import "./Dependencies/CheckContract.sol";
+@@ -29,9 +27,9 @@
+ 
+     ILUSDToken public override lusdToken;
+ 
+-    ILQTYToken public override lqtyToken;
+-
+-    ILQTYStaking public override lqtyStaking;
++    // MENGER: no LQTY token. The redemption bootstrap period starts when the system is wired (setAddresses),
++    // instead of at the LQTY token deployment.
++    uint public systemDeploymentTime;
+ 
+     // A doubly linked list of Troves, sorted by their sorted by their collateral ratios
+     ISortedTroves public sortedTroves;
+@@ -171,7 +169,6 @@
+         IActivePool activePool;
+         IDefaultPool defaultPool;
+         ILUSDToken lusdToken;
+-        ILQTYStaking lqtyStaking;
+         ISortedTroves sortedTroves;
+         ICollSurplusPool collSurplusPool;
+         address gasPoolAddress;
+@@ -206,8 +203,6 @@
+     event GasPoolAddressChanged(address _gasPoolAddress);
+     event CollSurplusPoolAddressChanged(address _collSurplusPoolAddress);
+     event SortedTrovesAddressChanged(address _sortedTrovesAddress);
+-    event LQTYTokenAddressChanged(address _lqtyTokenAddress);
+-    event LQTYStakingAddressChanged(address _lqtyStakingAddress);
+ 
+     event Liquidation(uint _liquidatedDebt, uint _liquidatedColl, uint _collGasCompensation, uint _LUSDGasCompensation);
+     event Redemption(uint _attemptedLUSDAmount, uint _actualLUSDAmount, uint _ETHSent, uint _ETHFee);
+@@ -240,9 +235,7 @@
+         address _collSurplusPoolAddress,
+         address _priceFeedAddress,
+         address _lusdTokenAddress,
+-        address _sortedTrovesAddress,
+-        address _lqtyTokenAddress,
+-        address _lqtyStakingAddress
++        address _sortedTrovesAddress
+     )
+         external
+         override
+@@ -257,8 +250,6 @@
+         checkContract(_priceFeedAddress);
+         checkContract(_lusdTokenAddress);
+         checkContract(_sortedTrovesAddress);
+-        checkContract(_lqtyTokenAddress);
+-        checkContract(_lqtyStakingAddress);
+ 
+         borrowerOperationsAddress = _borrowerOperationsAddress;
+         activePool = IActivePool(_activePoolAddress);
+@@ -269,8 +260,7 @@
+         priceFeed = IPriceFeed(_priceFeedAddress);
+         lusdToken = ILUSDToken(_lusdTokenAddress);
+         sortedTroves = ISortedTroves(_sortedTrovesAddress);
+-        lqtyToken = ILQTYToken(_lqtyTokenAddress);
+-        lqtyStaking = ILQTYStaking(_lqtyStakingAddress);
++        systemDeploymentTime = block.timestamp;
+ 
+         emit BorrowerOperationsAddressChanged(_borrowerOperationsAddress);
+         emit ActivePoolAddressChanged(_activePoolAddress);
+@@ -281,8 +271,6 @@
+         emit PriceFeedAddressChanged(_priceFeedAddress);
+         emit LUSDTokenAddressChanged(_lusdTokenAddress);
+         emit SortedTrovesAddressChanged(_sortedTrovesAddress);
+-        emit LQTYTokenAddressChanged(_lqtyTokenAddress);
+-        emit LQTYStakingAddressChanged(_lqtyStakingAddress);
+ 
+         _renounceOwnership();
+     }
+@@ -497,7 +485,6 @@
+             activePool,
+             defaultPool,
+             ILUSDToken(address(0)),
+-            ILQTYStaking(address(0)),
+             sortedTroves,
+             ICollSurplusPool(address(0)),
+             address(0)
+@@ -938,7 +925,6 @@
+             activePool,
+             defaultPool,
+             lusdToken,
+-            lqtyStaking,
+             sortedTroves,
+             collSurplusPool,
+             gasPoolAddress
+@@ -948,6 +934,8 @@
+         _requireValidMaxFeePercentage(_maxFeePercentage);
+         _requireAfterBootstrapPeriod();
+         totals.price = priceFeed.fetchPrice();
++        // MENGER: no redemptions while the gold market is closed (weekend) or while the gold price is stale or disputed
++        _requireRedemptionsAllowedByPriceFeed();
+         _requireTCRoverMCR(totals.price);
+         _requireAmountGreaterThanZero(_LUSDamount);
+         _requireLUSDBalanceCoversRedemption(contractsCache.lusdToken, msg.sender, _LUSDamount);
+@@ -1005,11 +993,19 @@
+         // Calculate the ETH fee
+         totals.ETHFee = _getRedemptionFee(totals.totalETHDrawn);
+ 
++        // MENGER: the ETH fee goes to Stability Pool depositors, released gradually (it went to LQTY stakers in
++        // Liquity V1). If the Stability Pool is empty there is nobody to pay, so no fee is charged.
++        IStabilityPool stabilityPoolCached = stabilityPool;
++        if (stabilityPoolCached.getTotalLUSDDeposits() == 0) {
++            totals.ETHFee = 0;
++        }
++
+         _requireUserAcceptsFee(totals.ETHFee, totals.totalETHDrawn, _maxFeePercentage);
+ 
+-        // Send the ETH fee to the LQTY staking contract
+-        contractsCache.activePool.sendETH(address(contractsCache.lqtyStaking), totals.ETHFee);
+-        contractsCache.lqtyStaking.increaseF_ETH(totals.ETHFee);
++        if (totals.ETHFee > 0) {
++            contractsCache.activePool.sendETH(address(stabilityPoolCached), totals.ETHFee);
++            stabilityPoolCached.distributeRedemptionFee(totals.ETHFee);
++        }
+ 
+         totals.ETHToSendToRedeemer = totals.totalETHDrawn.sub(totals.ETHFee);
+ 
+@@ -1497,8 +1493,12 @@
+         require(_getTCR(_price) >= MCR, "TroveManager: Cannot redeem when TCR < MCR");
+     }
+ 
++    // MENGER: see MengerPriceFeed.isRedemptionAllowed (weekend window, stale or disputed gold price, unreliable ETH price)
++    function _requireRedemptionsAllowedByPriceFeed() internal view {
++        require(priceFeed.isRedemptionAllowed(), "TroveManager: Redemptions suspended (gold market closed or price unreliable)");
++    }
++
+     function _requireAfterBootstrapPeriod() internal view {
+-        uint systemDeploymentTime = lqtyToken.getDeploymentStartTime();
+         require(block.timestamp >= systemDeploymentTime.add(BOOTSTRAP_PERIOD), "TroveManager: Redemptions are not allowed during bootstrap phase");
+     }
+ 
+--- liquity-v1/Dependencies/LiquityBase.sol
++++ menger-v0/Dependencies/LiquityBase.sol
+@@ -24,12 +24,14 @@
+     // Critical system collateral ratio. If the system's total collateral ratio (TCR) falls below the CCR, Recovery Mode is triggered.
+     uint constant public CCR = 1500000000000000000; // 150%
+ 
+-    // Amount of LUSD to be locked in gas pool on opening troves
+-    uint constant public LUSD_GAS_COMPENSATION = 200e18;
++    // MENGER: amounts below are in Mengers (1 Menger = 3.545 g of fine gold), no longer in US dollars.
++    // Liquity V1 used 200 LUSD and 1,800 LUSD; at ~490 USD per Menger (September 2026) these become 0.4 and 4 Mengers.
+ 
+-    // Minimum amount of net LUSD debt a trove must have
+-    uint constant public MIN_NET_DEBT = 1800e18;
+-    // uint constant public MIN_NET_DEBT = 0; 
++    // Amount of LUSD (= Menger) to be locked in gas pool on opening troves
++    uint constant public LUSD_GAS_COMPENSATION = 4e17; // 0.4 Menger
++
++    // Minimum amount of net LUSD (= Menger) debt a trove must have
++    uint constant public MIN_NET_DEBT = 4e18; // 4 Mengers
+ 
+     uint constant public PERCENT_DIVISOR = 200; // dividing by 200 yields 0.5%
+ 
+--- liquity-v1/Interfaces/IBorrowerOperations.sol
++++ menger-v0/Interfaces/IBorrowerOperations.sol
+@@ -16,7 +16,7 @@
+     event PriceFeedAddressChanged(address  _newPriceFeedAddress);
+     event SortedTrovesAddressChanged(address _sortedTrovesAddress);
+     event LUSDTokenAddressChanged(address _lusdTokenAddress);
+-    event LQTYStakingAddressChanged(address _lqtyStakingAddress);
++    event BorrowingFeeRecipientChanged(address _borrowingFeeRecipient);
+ 
+     event TroveCreated(address indexed _borrower, uint arrayIndex);
+     event TroveUpdated(address indexed _borrower, uint _debt, uint _coll, uint stake, uint8 operation);
+@@ -34,7 +34,7 @@
+         address _priceFeedAddress,
+         address _sortedTrovesAddress,
+         address _lusdTokenAddress,
+-        address _lqtyStakingAddress
++        address _borrowingFeeRecipient
+     ) external;
+ 
+     function openTrove(uint _maxFee, uint _LUSDAmount, address _upperHint, address _lowerHint) external payable;
+--- liquity-v1/Interfaces/IPriceFeed.sol
++++ menger-v0/Interfaces/IPriceFeed.sol
+@@ -6,7 +6,13 @@
+ 
+     // --- Events ---
+     event LastGoodPriceUpdated(uint _lastGoodPrice);
+-   
++
+     // --- Function ---
++
++    // MENGER: returns the price of 1 ETH in Mengers (1 Menger = 3.545 g of fine gold), with 18 decimals.
+     function fetchPrice() external returns (uint);
++
++    // MENGER: false while the gold market is closed (weekend window) or while the gold or ETH price is not reliable.
++    // TroveManager refuses redemptions when this returns false. Liquidations and borrowing are never blocked.
++    function isRedemptionAllowed() external view returns (bool);
+ }
+--- liquity-v1/Interfaces/IStabilityPool.sol
++++ menger-v0/Interfaces/IStabilityPool.sol
+@@ -148,6 +148,16 @@
+     function offset(uint _debt, uint _coll) external;
+ 
+     /*
++     * MENGER
++     * Initial checks:
++     * - Caller is TroveManager
++     * ---
++     * Receives a redemption fee (ETH already received from the ActivePool). The fee is released to depositors
++     * gradually, pro rata to their deposits, over FEE_RELEASE_PERIOD.
++     */
++    function distributeRedemptionFee(uint _ETHFee) external;
++
++    /*
+      * Returns the total amount of ETH held by the pool, accounted in an internal variable instead of `balance`,
+      * to exclude edge cases like ETH received from a self-destruct.
+      */
+--- liquity-v1/Interfaces/ITroveManager.sol
++++ menger-v0/Interfaces/ITroveManager.sol
+@@ -5,8 +5,6 @@
+ import "./ILiquityBase.sol";
+ import "./IStabilityPool.sol";
+ import "./ILUSDToken.sol";
+-import "./ILQTYToken.sol";
+-import "./ILQTYStaking.sol";
+ 
+ 
+ // Common interface for the Trove Manager.
+@@ -23,8 +21,6 @@
+     event GasPoolAddressChanged(address _gasPoolAddress);
+     event CollSurplusPoolAddressChanged(address _collSurplusPoolAddress);
+     event SortedTrovesAddressChanged(address _sortedTrovesAddress);
+-    event LQTYTokenAddressChanged(address _lqtyTokenAddress);
+-    event LQTYStakingAddressChanged(address _lqtyStakingAddress);
+ 
+     event Liquidation(uint _liquidatedDebt, uint _liquidatedColl, uint _collGasCompensation, uint _LUSDGasCompensation);
+     event Redemption(uint _attemptedLUSDAmount, uint _actualLUSDAmount, uint _ETHSent, uint _ETHFee);
+@@ -49,15 +45,11 @@
+         address _collSurplusPoolAddress,
+         address _priceFeedAddress,
+         address _lusdTokenAddress,
+-        address _sortedTrovesAddress,
+-        address _lqtyTokenAddress,
+-        address _lqtyStakingAddress
++        address _sortedTrovesAddress
+     ) external;
+ 
+     function stabilityPool() external view returns (IStabilityPool);
+     function lusdToken() external view returns (ILUSDToken);
+-    function lqtyToken() external view returns (ILQTYToken);
+-    function lqtyStaking() external view returns (ILQTYStaking);
+ 
+     function getTroveOwnersCount() external view returns (uint);
+ 
+--- /dev/null
++++ menger-v0/MengerPriceFeed.sol
+@@ -0,0 +1,420 @@
++// SPDX-License-Identifier: MIT
++
++pragma solidity 0.6.11;
++
++import "./Interfaces/IPriceFeed.sol";
++import "./Dependencies/AggregatorV3Interface.sol";
++import "./Dependencies/SafeMath.sol";
++import "./Dependencies/BaseMath.sol";
++
++/*
++* MENGER price feed. Replaces Liquity V1's PriceFeed (Chainlink + Tellor for ETH/USD).
++*
++* The system's debt unit is the Menger: 3.545 g of fine gold, the weight of the Venetian ducat (1284-1797).
++* Every price used by TroveManager and BorrowerOperations is the price of 1 ETH in Mengers, with 18 decimals:
++*
++*     ETH/Menger = ETH/USD / ( XAU/USD x 3.545 / 31.1034768 )
++*
++* where XAU/USD is the price of one troy ounce (31.1034768 g) of gold.
++*
++* Sources: any Chainlink-compatible AggregatorV3Interface that supports getRoundData, fixed at deployment.
++* No owner, no upgrade. For each of ETH/USD and XAU/USD, a primary and a secondary feed.
++*
++* Reading a feed. A feed's answer is valid when it is positive and in range (at most MAX_PRICE once scaled), with a
++* sane timestamp. It is LIVE when recent enough: 4 hours for ETH, 4 days for gold (the gold market closes on
++* weekends and holidays, and its last price stays the market price). As in Liquity V1, each answer is compared with
++* the feed's previous round: a move of more than 50 % in one round means the feed is broken.
++*
++* Choosing the price (fetchPrice(), which never reverts, so that liquidations always remain possible):
++*  - Each pair follows its primary, as Liquity V1 followed Chainlink. A disagreement with the secondary does not
++*    change the price; it only suspends redemptions.
++*  - A primary that jumped is distrusted, and stays distrusted until it agrees with the secondary again (Liquity V1's
++*    rule). Meanwhile the secondary is used. This is the only state kept besides the last good prices.
++*  - The secondary also takes over when the primary is frozen or broken, and, for gold, when the primary is lagging:
++*    the two disagree, only the secondary was updated within GOLD_MAX_AGE, and the gold market is open.
++*  - When neither feed can be used, the last good price is kept.
++*
++* isRedemptionAllowed() is stricter: the secondary feeds must confirm the primaries. TroveManager refuses
++* redemptions unless:
++*  - the gold market is open: no redemptions from Friday 21:00 UTC to Monday 00:00 UTC. The gold market closes on
++*    Friday at 17:00 and reopens on Sunday at 18:00, New York time; the UTC window covers both summer and winter
++*    time, plus at least one hour of margin after the reopening;
++*  - both gold feeds can be used, agree within 1 %, and were both updated within GOLD_MAX_AGE;
++*  - the ETH price comes from a feed, and the other ETH feed does not contradict it by more than 5 %.
++*/
++contract MengerPriceFeed is IPriceFeed, BaseMath {
++    using SafeMath for uint;
++
++    string constant public NAME = "MengerPriceFeed";
++
++    // --- Gold weights, in units of 1e-7 gram ---
++
++    uint constant public MENGER_WEIGHT = 35450000;       // 3.545 g of fine gold
++    uint constant public TROY_OUNCE_WEIGHT = 311034768;  // 31.1034768 g
++
++    // --- Parameters ---
++
++    uint constant public TARGET_DIGITS = 18;
++
++    // Prices above this (in USD, 18 decimals) are treated as a broken answer: 1e18 USD per unit
++    uint constant public MAX_PRICE = 1e36;
++
++    // Gas given to each call to a feed: far above what a price feed needs, low enough that a hostile feed cannot
++    // make fetchPrice() run out of gas
++    uint constant public FEED_CALL_GAS = 500000;
++
++    // An ETH/USD feed older than this is frozen (same value as Liquity V1)
++    uint constant public ETH_TIMEOUT = 4 hours;
++
++    // A gold feed older than this is frozen: longer than any market closure (Good Friday to Monday is 75 hours)
++    uint constant public GOLD_TIMEOUT = 4 days;
++
++    // A feed whose answer moved by more than this since its previous round is broken (same value as Liquity V1)
++    uint constant public MAX_ROUND_CHANGE = 5e17; // 50%
++
++    // Maximum relative difference between the two ETH/USD feeds for redemptions (Liquity V1: Chainlink vs Tellor)
++    uint constant public MAX_ETH_DEVIATION = 5e16; // 5%
++
++    // Maximum relative difference between the two XAU/USD feeds for redemptions
++    uint constant public MAX_GOLD_DEVIATION = 1e16; // 1%
++
++    // Redemptions are suspended from Friday 21:00 UTC until Monday 00:00 UTC
++    uint constant public WEEKEND_START_ON_FRIDAY = 75600; // 21 hours
++
++    // Redemptions are suspended if a gold feed was not updated within this delay (set at deployment)
++    uint public immutable GOLD_MAX_AGE;
++
++    AggregatorV3Interface public immutable ethUsdPrimary;
++    AggregatorV3Interface public immutable ethUsdSecondary;
++    AggregatorV3Interface public immutable xauUsdPrimary;
++    AggregatorV3Interface public immutable xauUsdSecondary;
++
++    uint8 public immutable ethUsdPrimaryDecimals;
++    uint8 public immutable ethUsdSecondaryDecimals;
++    uint8 public immutable xauUsdPrimaryDecimals;
++    uint8 public immutable xauUsdSecondaryDecimals;
++
++    // Price of 1 ETH in Mengers, 18 decimals. Updated by every fetchPrice() call.
++    uint public lastGoodPrice;
++
++    // Last prices actually read from the feeds, 18 decimals
++    uint public lastGoodEthUsdPrice;
++    uint public lastGoodXauUsdPrice;
++
++    // A primary that jumped stays distrusted until it agrees with its secondary again
++    bool public ethPrimaryUntrusted;
++    bool public xauPrimaryUntrusted;
++
++    struct FeedResponse {
++        bool success;      // a valid answer, in range
++        uint price;        // 18 decimals
++        uint updatedAt;
++        bool jumped;       // moved by more than MAX_ROUND_CHANGE since its previous round
++        bool prevMissing;  // the previous round is unavailable, so the move cannot be checked
++    }
++
++    struct Selection {
++        uint price;
++        bool fromFeed;          // false: the last good price is kept
++        bool confirmed;         // ETH: the other feed does not contradict it. Gold: both usable and agreeing
++        bool fresh;             // gold only: both feeds updated within GOLD_MAX_AGE
++        bool primaryUntrusted;  // the primary's trust after this reading
++    }
++
++    // --- Events ---
++
++    event LastGoodEthUsdPriceUpdated(uint _ethUsdPrice);
++    event LastGoodXauUsdPriceUpdated(uint _xauUsdPrice);
++    event EthPrimaryTrustChanged(bool _untrusted);
++    event XauPrimaryTrustChanged(bool _untrusted);
++
++    // --- Constructor ---
++
++    constructor(
++        address _ethUsdPrimary,
++        address _ethUsdSecondary,
++        address _xauUsdPrimary,
++        address _xauUsdSecondary,
++        uint _goldMaxAge
++    )
++        public
++    {
++        require(
++            _ethUsdPrimary != address(0) && _ethUsdSecondary != address(0) &&
++            _xauUsdPrimary != address(0) && _xauUsdSecondary != address(0),
++            "MengerPriceFeed: zero address"
++        );
++        require(_ethUsdPrimary != _ethUsdSecondary, "MengerPriceFeed: ETH feeds must be different");
++        require(_xauUsdPrimary != _xauUsdSecondary, "MengerPriceFeed: gold feeds must be different");
++        require(_goldMaxAge > 0 && _goldMaxAge <= GOLD_TIMEOUT, "MengerPriceFeed: gold max age out of range");
++
++        uint8 ethPrimaryDecimals = AggregatorV3Interface(_ethUsdPrimary).decimals();
++        uint8 ethSecondaryDecimals = AggregatorV3Interface(_ethUsdSecondary).decimals();
++        uint8 xauPrimaryDecimals = AggregatorV3Interface(_xauUsdPrimary).decimals();
++        uint8 xauSecondaryDecimals = AggregatorV3Interface(_xauUsdSecondary).decimals();
++        require(
++            ethPrimaryDecimals <= 36 && ethSecondaryDecimals <= 36 && xauPrimaryDecimals <= 36 && xauSecondaryDecimals <= 36,
++            "MengerPriceFeed: unsupported decimals"
++        );
++
++        ethUsdPrimary = AggregatorV3Interface(_ethUsdPrimary);
++        ethUsdSecondary = AggregatorV3Interface(_ethUsdSecondary);
++        xauUsdPrimary = AggregatorV3Interface(_xauUsdPrimary);
++        xauUsdSecondary = AggregatorV3Interface(_xauUsdSecondary);
++
++        ethUsdPrimaryDecimals = ethPrimaryDecimals;
++        ethUsdSecondaryDecimals = ethSecondaryDecimals;
++        xauUsdPrimaryDecimals = xauPrimaryDecimals;
++        xauUsdSecondaryDecimals = xauSecondaryDecimals;
++
++        GOLD_MAX_AGE = _goldMaxAge;
++
++        // The system must start from four working feeds that agree, each with its round history (getRoundData).
++        // (Immutables cannot be read during construction, hence the local variables.)
++        FeedResponse memory ethA = _readFeed(_ethUsdPrimary, ethPrimaryDecimals);
++        FeedResponse memory ethB = _readFeed(_ethUsdSecondary, ethSecondaryDecimals);
++        require(
++            _isUsable(ethA, ETH_TIMEOUT) && _isUsable(ethB, ETH_TIMEOUT) &&
++            _withinDeviation(ethA.price, ethB.price, MAX_ETH_DEVIATION),
++            "MengerPriceFeed: ETH feeds not working or not agreeing"
++        );
++        FeedResponse memory xauA = _readFeed(_xauUsdPrimary, xauPrimaryDecimals);
++        FeedResponse memory xauB = _readFeed(_xauUsdSecondary, xauSecondaryDecimals);
++        require(
++            _isUsable(xauA, GOLD_TIMEOUT) && _isUsable(xauB, GOLD_TIMEOUT) &&
++            _withinDeviation(xauA.price, xauB.price, MAX_GOLD_DEVIATION),
++            "MengerPriceFeed: gold feeds not working or not agreeing"
++        );
++
++        _storeEthUsdPrice(ethA.price);
++        _storeXauUsdPrice(xauA.price);
++        _storePrice(_computeEthMengerPrice(ethA.price, xauA.price));
++    }
++
++    // --- Functions ---
++
++    /*
++    * Returns the price of 1 ETH in Mengers (18 decimals) and stores it as lastGoodPrice. Never reverts.
++    */
++    function fetchPrice() external override returns (uint) {
++        Selection memory eth = _selectEth();
++        Selection memory xau = _selectXau();
++
++        if (eth.primaryUntrusted != ethPrimaryUntrusted) {
++            ethPrimaryUntrusted = eth.primaryUntrusted;
++            emit EthPrimaryTrustChanged(eth.primaryUntrusted);
++        }
++        if (xau.primaryUntrusted != xauPrimaryUntrusted) {
++            xauPrimaryUntrusted = xau.primaryUntrusted;
++            emit XauPrimaryTrustChanged(xau.primaryUntrusted);
++        }
++        if (eth.fromFeed) { _storeEthUsdPrice(eth.price); }
++        if (xau.fromFeed) { _storeXauUsdPrice(xau.price); }
++
++        uint price = _computeEthMengerPrice(eth.price, xau.price);
++        if (price == 0) { return lastGoodPrice; } // only reachable with absurd but in-range answers
++        _storePrice(price);
++
++        return price;
++    }
++
++    function isRedemptionAllowed() external view override returns (bool) {
++        if (isGoldMarketClosedAt(block.timestamp)) { return false; }
++
++        Selection memory eth = _selectEth();
++        if (!eth.fromFeed || !eth.confirmed) { return false; }
++
++        Selection memory xau = _selectXau();
++        return xau.confirmed && xau.fresh;
++    }
++
++    /*
++    * True from Friday 21:00 UTC to Monday 00:00 UTC. The Unix epoch (1 January 1970) was a Thursday,
++    * hence the +4: day 0 = Sunday, 1 = Monday, ..., 5 = Friday, 6 = Saturday.
++    */
++    function isGoldMarketClosedAt(uint _timestamp) public pure returns (bool) {
++        uint dayOfWeek = (_timestamp / 1 days + 4) % 7;
++        uint secondOfDay = _timestamp % 1 days;
++
++        if (dayOfWeek == 6 || dayOfWeek == 0) { return true; }                    // Saturday, Sunday
++        if (dayOfWeek == 5 && secondOfDay >= WEEKEND_START_ON_FRIDAY) { return true; } // Friday evening
++        return false;
++    }
++
++    // --- Views for front ends and tests (what fetchPrice() would use now) ---
++
++    // reliable: good enough for redemptions
++    function getEthUsdPrice() external view returns (uint price, bool reliable) {
++        Selection memory eth = _selectEth();
++        return (eth.price, eth.fromFeed && eth.confirmed);
++    }
++
++    // agreed: both gold feeds usable and within 1 %; fresh: both updated within GOLD_MAX_AGE
++    function getXauUsdPrice() external view returns (uint price, bool agreed, bool fresh) {
++        Selection memory xau = _selectXau();
++        return (xau.price, xau.confirmed, xau.fresh);
++    }
++
++    // --- Internal price selection ---
++
++    function _selectEth() internal view returns (Selection memory sel) {
++        FeedResponse memory primary = _readFeed(address(ethUsdPrimary), ethUsdPrimaryDecimals);
++        FeedResponse memory secondary = _readFeed(address(ethUsdSecondary), ethUsdSecondaryDecimals);
++
++        bool primaryLive = _isLive(primary, ETH_TIMEOUT);
++        bool secondaryUsable = _isUsable(secondary, ETH_TIMEOUT);
++        bool agree = primaryLive && secondaryUsable && _withinDeviation(primary.price, secondary.price, MAX_ETH_DEVIATION);
++
++        // A primary that jumped is distrusted until it agrees with the secondary again
++        sel.primaryUntrusted = agree ? false : (ethPrimaryUntrusted || (primaryLive && primary.jumped));
++        bool primaryUsable = primaryLive && !primary.jumped && !primary.prevMissing && !sel.primaryUntrusted;
++
++        if (primaryUsable) {
++            sel.price = primary.price;
++            sel.fromFeed = true;
++            sel.confirmed = !secondaryUsable || agree;
++        } else if (secondaryUsable) {
++            // Redemptions stay allowed if the primary is silent, not if it still answers another price
++            sel.price = secondary.price;
++            sel.fromFeed = true;
++            sel.confirmed = !primaryLive || agree;
++        } else {
++            sel.price = lastGoodEthUsdPrice;
++        }
++    }
++
++    function _selectXau() internal view returns (Selection memory sel) {
++        FeedResponse memory primary = _readFeed(address(xauUsdPrimary), xauUsdPrimaryDecimals);
++        FeedResponse memory secondary = _readFeed(address(xauUsdSecondary), xauUsdSecondaryDecimals);
++
++        bool primaryLive = _isLive(primary, GOLD_TIMEOUT);
++        bool secondaryUsable = _isUsable(secondary, GOLD_TIMEOUT);
++        bool agree = primaryLive && secondaryUsable && _withinDeviation(primary.price, secondary.price, MAX_GOLD_DEVIATION);
++
++        sel.primaryUntrusted = agree ? false : (xauPrimaryUntrusted || (primaryLive && primary.jumped));
++        bool primaryUsable = primaryLive && !primary.jumped && !primary.prevMissing && !sel.primaryUntrusted;
++
++        bool secondaryFresh = secondaryUsable && _age(secondary) <= GOLD_MAX_AGE;
++        sel.confirmed = primaryUsable && agree;
++        sel.fresh = primaryUsable && _age(primary) <= GOLD_MAX_AGE && secondaryFresh;
++
++        if (primaryUsable) {
++            // The primary is lagging: they disagree, only the secondary is recent, and the market is open. On a
++            // weekend a quiet primary is normal, and the secondary alone must not move the gold price.
++            bool lagging = secondaryUsable && !agree && secondaryFresh && _age(primary) > GOLD_MAX_AGE &&
++                !isGoldMarketClosedAt(block.timestamp);
++            sel.price = lagging ? secondary.price : primary.price;
++            sel.fromFeed = true;
++        } else if (secondaryUsable) {
++            sel.price = secondary.price;
++            sel.fromFeed = true;
++        } else {
++            sel.price = lastGoodXauUsdPrice;
++        }
++    }
++
++    // --- Feed reading ---
++
++    function _readFeed(address _feed, uint8 _decimals) internal view returns (FeedResponse memory response) {
++        (bool ok, uint roundId, int256 answer, uint updatedAt) =
++            _callFeed(_feed, abi.encodeWithSelector(AggregatorV3Interface.latestRoundData.selector));
++        if (!ok || roundId == 0 || updatedAt == 0 || updatedAt > block.timestamp || answer <= 0) {
++            return response;
++        }
++        uint price = _scalePrice(uint(answer), _decimals);
++        if (price == 0) { return response; }
++
++        response.success = true;
++        response.price = price;
++        response.updatedAt = updatedAt;
++
++        // Compare with the previous round, as Liquity V1 did for Chainlink
++        (bool prevOk, uint prevRoundId, int256 prevAnswer, uint prevUpdatedAt) =
++            _callFeed(_feed, abi.encodeWithSelector(AggregatorV3Interface.getRoundData.selector, uint80(roundId - 1)));
++        uint prevPrice = prevAnswer > 0 ? _scalePrice(uint(prevAnswer), _decimals) : 0;
++        if (!prevOk || prevRoundId == 0 || prevUpdatedAt == 0 || prevUpdatedAt > block.timestamp || prevPrice == 0) {
++            response.prevMissing = true;
++        } else {
++            response.jumped = !_withinRoundChange(price, prevPrice);
++        }
++    }
++
++    /*
++    * Low-level call with a gas cap that copies at most the 160 bytes expected: a revert, short or malformed data,
++    * a feed without code, a gas-burning feed or a huge return buffer all count as a failed answer, and cannot make
++    * fetchPrice() revert. Every value is read as a full word.
++    */
++    function _callFeed(address _feed, bytes memory _calldata)
++        internal
++        view
++        returns (bool ok, uint roundId, int256 answer, uint updatedAt)
++    {
++        uint[5] memory out;
++        bool success;
++        uint size;
++        uint gasCap = FEED_CALL_GAS;
++        assembly {
++            success := staticcall(gasCap, _feed, add(_calldata, 0x20), mload(_calldata), out, 160)
++            size := returndatasize()
++        }
++        if (!success || size < 160 || out[0] > uint80(-1)) { return (false, 0, 0, 0); }
++        return (true, out[0], int256(out[1]), out[3]);
++    }
++
++    function _isLive(FeedResponse memory _response, uint _timeout) internal view returns (bool) {
++        return _response.success && _age(_response) <= _timeout;
++    }
++
++    function _isUsable(FeedResponse memory _response, uint _timeout) internal view returns (bool) {
++        return _isLive(_response, _timeout) && !_response.jumped && !_response.prevMissing;
++    }
++
++    function _age(FeedResponse memory _response) internal view returns (uint) {
++        return block.timestamp - _response.updatedAt; // updatedAt <= block.timestamp is checked when reading
++    }
++
++    // Scales an answer to 18 decimals. Returns 0 (a failed answer) if the result would exceed MAX_PRICE.
++    function _scalePrice(uint _answer, uint8 _decimals) internal pure returns (uint) {
++        if (_decimals >= TARGET_DIGITS) {
++            uint scaled = _answer / (10 ** (uint(_decimals) - TARGET_DIGITS));
++            return scaled > MAX_PRICE ? 0 : scaled;
++        }
++        uint factor = 10 ** (TARGET_DIGITS - uint(_decimals));
++        if (_answer > MAX_PRICE / factor) { return 0; }
++        return _answer * factor;
++    }
++
++    // Relative difference measured against the lower price, as in Liquity V1
++    function _withinDeviation(uint _a, uint _b, uint _maxDeviation) internal pure returns (bool) {
++        uint minPrice = _a < _b ? _a : _b;
++        uint maxPrice = _a < _b ? _b : _a;
++        return maxPrice.sub(minPrice).mul(DECIMAL_PRECISION) <= minPrice.mul(_maxDeviation);
++    }
++
++    // Relative change measured against the higher price, as Liquity V1 did between two Chainlink rounds
++    function _withinRoundChange(uint _current, uint _previous) internal pure returns (bool) {
++        uint minPrice = _current < _previous ? _current : _previous;
++        uint maxPrice = _current < _previous ? _previous : _current;
++        return maxPrice.sub(minPrice).mul(DECIMAL_PRECISION) <= maxPrice.mul(MAX_ROUND_CHANGE);
++    }
++
++    function _computeEthMengerPrice(uint _ethUsd, uint _xauUsd) internal pure returns (uint) {
++        // ETH/Menger = ETH/USD x TROY_OUNCE_WEIGHT / (XAU/USD x MENGER_WEIGHT). Both prices are at most MAX_PRICE.
++        return _ethUsd.mul(DECIMAL_PRECISION).mul(TROY_OUNCE_WEIGHT).div(_xauUsd.mul(MENGER_WEIGHT));
++    }
++
++    function _storePrice(uint _price) internal {
++        lastGoodPrice = _price;
++        emit LastGoodPriceUpdated(_price);
++    }
++
++    function _storeEthUsdPrice(uint _price) internal {
++        lastGoodEthUsdPrice = _price;
++        emit LastGoodEthUsdPriceUpdated(_price);
++    }
++
++    function _storeXauUsdPrice(uint _price) internal {
++        lastGoodXauUsdPrice = _price;
++        emit LastGoodXauUsdPriceUpdated(_price);
++    }
++}
+--- /dev/null
++++ menger-v0/StabilityPoolFeeIssuance.sol
+@@ -0,0 +1,136 @@
++// SPDX-License-Identifier: MIT
++
++pragma solidity 0.6.11;
++
++import "./Interfaces/ICommunityIssuance.sol";
++import "./Interfaces/ILUSDToken.sol";
++import "./Interfaces/IStabilityPool.sol";
++import "./Dependencies/Ownable.sol";
++import "./Dependencies/CheckContract.sol";
++import "./Dependencies/SafeMath.sol";
++import "./Dependencies/LiquityMath.sol";
++
++/*
++* MENGER: replaces Liquity V1's CommunityIssuance. There is no LQTY token and no pre-mine.
++*
++* BorrowerOperations mints every borrowing fee (in Mengers) to this contract. Liquity V1's CommunityIssuance
++* released LQTY to the Stability Pool little by little, at each pool operation, according to the time elapsed.
++* This contract does the same with the fees: at each pool operation, issueLQTY() releases the part of the pending
++* fees that matches the time elapsed since the previous operation (all of them once FEE_RELEASE_PERIOD has passed).
++* The pool distributes what is released to depositors pro rata through its sum G, exactly as it distributed LQTY.
++* The interface and its function names are unchanged, so the Stability Pool code that uses them is unchanged.
++*
++* Why gradually: handed over at once, a large fee could be captured by someone who deposits just before it is
++* paid and withdraws just after, without having protected the system. Released over time, fees go to the
++* depositors who stay in the pool.
++*
++* Fees received between two pool operations start being released at the next operation.
++* No fee is ever lost: while the Stability Pool is empty nothing is released, and the fees wait here.
++* Anyone may send Mengers to this contract; they are then distributed to depositors like fees.
++*/
++contract StabilityPoolFeeIssuance is ICommunityIssuance, Ownable, CheckContract {
++    using SafeMath for uint;
++
++    // --- Data ---
++
++    string constant public NAME = "StabilityPoolFeeIssuance";
++
++    // Each release hands over (time elapsed / FEE_RELEASE_PERIOD) of the pending fees, or all of them
++    uint constant public FEE_RELEASE_PERIOD = 7 days;
++
++    ILUSDToken public lusdToken;
++
++    address public stabilityPoolAddress;
++
++    // Fees received and not yet released to the Stability Pool
++    uint public pendingFees;
++
++    // Fees released to the Stability Pool (accounted in its sum G) and not yet paid out to depositors
++    uint public totalIssuedNotPaid;
++
++    // Cumulative fees released to the Stability Pool (name kept from Liquity V1)
++    uint public totalLQTYIssued;
++
++    uint public lastReleaseTime;
++
++    event PendingFeesUpdated(uint _pendingFees);
++
++    // --- Functions ---
++
++    function setAddresses
++    (
++        address _lusdTokenAddress,
++        address _stabilityPoolAddress
++    )
++        external
++        onlyOwner
++        override
++    {
++        checkContract(_lusdTokenAddress);
++        checkContract(_stabilityPoolAddress);
++
++        lusdToken = ILUSDToken(_lusdTokenAddress);
++        stabilityPoolAddress = _stabilityPoolAddress;
++        lastReleaseTime = block.timestamp;
++
++        emit LQTYTokenAddressSet(_lusdTokenAddress);
++        emit StabilityPoolAddressSet(_stabilityPoolAddress);
++
++        _renounceOwnership();
++    }
++
++    /*
++    * Called by the Stability Pool at each operation (deposit, withdrawal, liquidation). Returns the fees released.
++    * 1) Releases the part of the pending fees that matches the time elapsed since the last call.
++    *    While the pool holds no deposits nothing is released: nobody could receive it.
++    * 2) Fees received since the last call become pending: their release starts now.
++    */
++    function issueLQTY() external override returns (uint) {
++        _requireCallerIsStabilityPool();
++
++        uint elapsed = block.timestamp.sub(lastReleaseTime);
++        lastReleaseTime = block.timestamp;
++
++        uint pending = pendingFees;
++        uint issuance;
++        if (IStabilityPool(stabilityPoolAddress).getTotalLUSDDeposits() > 0) {
++            issuance = elapsed >= FEE_RELEASE_PERIOD ? pending : pending.mul(elapsed).div(FEE_RELEASE_PERIOD);
++        }
++
++        // Fees received since the last call: whatever is held here beyond the pending and the released fees
++        uint balance = lusdToken.balanceOf(address(this));
++        uint accounted = totalIssuedNotPaid.add(pending);
++        uint newFees = balance > accounted ? balance - accounted : 0;
++
++        pendingFees = pending.sub(issuance).add(newFees);
++        totalIssuedNotPaid = totalIssuedNotPaid.add(issuance);
++        totalLQTYIssued = totalLQTYIssued.add(issuance);
++
++        emit PendingFeesUpdated(pendingFees);
++        emit TotalLQTYIssuedUpdated(totalLQTYIssued);
++
++        return issuance;
++    }
++
++    /*
++    * Pays a depositor's (or front end's) share of the released fees.
++    * Rounding in the Stability Pool's sums can make the shares add up to a few units of 1e-18 Menger more than
++    * what was released. Capping each payment by the released fees not yet paid out means the last claimant
++    * receives that dust less, instead of their withdrawal reverting. Pending fees are never used.
++    */
++    function sendLQTY(address _account, uint _amount) external override {
++        _requireCallerIsStabilityPool();
++
++        uint amountToSend = LiquityMath._min(_amount, totalIssuedNotPaid);
++        if (amountToSend == 0) { return; }
++
++        totalIssuedNotPaid = totalIssuedNotPaid.sub(amountToSend);
++        lusdToken.transfer(_account, amountToSend);
++    }
++
++    // --- 'require' functions ---
++
++    function _requireCallerIsStabilityPool() internal view {
++        require(msg.sender == stabilityPoolAddress, "StabilityPoolFeeIssuance: caller is not SP");
++    }
++}

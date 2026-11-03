@@ -1,0 +1,13 @@
+# Compilation et scripts Foundry
+out/
+cache/
+broadcast/
+
+# Historique de prix téléchargé par sim/history.py (licences : ne pas redistribuer)
+sim/data/
+
+# Déploiements sur la blockchain locale (anvil)
+deployments/31337.json
+
+# Réglages et secrets locaux
+.env

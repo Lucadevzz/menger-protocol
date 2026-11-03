@@ -1,0 +1,26 @@
+[profile.default]
+src = "src"
+test = "test"
+script = "script"
+out = "out"
+libs = ["lib"]
+solc_version = "0.6.11"
+# Solidity 0.6.11 cannot target anything newer than istanbul. Forge therefore estimates gas with istanbul's rules,
+# cheaper than today's: when broadcasting to a real network, add --gas-estimate-multiplier 200 (see DEPLOIEMENT.md).
+evm_version = "istanbul"
+optimizer = true
+optimizer_runs = 100
+auto_detect_solc = false
+remappings = ["forge-std/=lib/forge-std/src/"]
+# Liquity V1 uses large contracts; tests deploy the whole system.
+gas_limit = "18446744073709551615"
+# The deployment script writes the deployed addresses to deployments/<chain id>.json
+fs_permissions = [{ access = "read-write", path = "./deployments" }]
+
+[fuzz]
+runs = 256
+
+[invariant]
+runs = 64
+depth = 60
+fail_on_revert = false
