@@ -1,0 +1,20 @@
+[package]
+name = "menger-ln"
+description = "Menger on Lightning: a balance that keeps its value in gold (1 Menger = 3.545 g), settled in bitcoin, self-custodial"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+menger-core = { path = "../core" }
+ldk-node = "0.7.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json", "native-certs", "proxy-from-env", "socks-proxy"] }
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"

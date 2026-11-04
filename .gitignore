@@ -11,3 +11,6 @@ deployments/31337.json
 
 # Réglages et secrets locaux
 .env
+
+# Compilation Rust (version Lightning)
+target/

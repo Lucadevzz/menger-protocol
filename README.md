@@ -6,6 +6,8 @@ Le nom rend hommage à Carl Menger, le fondateur de l'école autrichienne. En 18
 
 On emprunte des Mengers en déposant de l'ETH en garantie, comme on emprunte des LUSD sur Liquity. Le code est celui de Liquity V1, audité et en production depuis 2021, modifié le moins possible.
 
+> **Version Bitcoin** : le dossier [`lightning/`](lightning/README.md) contient le Menger sur Lightning. C'est un solde stable en or, réglé en bitcoin, sans jeton ni oracle commun, et c'est la direction choisie pour la suite. Ce qui suit décrit la v0 sur Ethereum, qui sert de démonstration.
+
 > **Prototype de recherche, non audité.** À utiliser uniquement sur un réseau de test. Avant tout lancement avec de l'argent réel : audit indépendant et avis d'un avocat (voir `audit/AUDIT.md` et l'onglet « État du projet » du document de projet).
 
 ## Comment le Menger suit l'or
