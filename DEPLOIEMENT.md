@@ -149,6 +149,14 @@ Les visiteurs ont besoin de MetaMask et d'un peu d'ETH de test ; le site leur in
 
 Tout ce qui suit se fait aussi dans l'interface web, sans terminal : onglets Emprunter, Pool de stabilité et Racheter, liste des emprunts les plus risqués avec le bouton de liquidation, et commandes de prix pour le déployeur. Les commandes ci-dessous restent utiles pour vérifier ou automatiser.
 
+**Sur Sepolia, augmente la marge de gaz pour ces actions.** Testé le 4 novembre 2026 : ouvrir un emprunt ou déposer au pool demande jusqu'à 3,3 fois l'estimation de forge, et une transaction échoue avec 200 ou 300. Avant les commandes ci-dessous :
+
+```bash
+export ENVOI="--rpc-url $RPC_URL --broadcast --gas-estimate-multiplier 500 --account menger-test"
+```
+
+Garde 200 pour le déploiement : avec 500, ses plus grosses transactions dépasseraient la limite de gaz d'un bloc. Sur anvil, 200 suffit partout.
+
 Les montants s'écrivent en unités de 10⁻¹⁸ ; `$(cast to-wei 5)` écrit 5 Mengers ou 5 ETH dans ce format. Chaque action affiche ensuite l'état du système et de ta position.
 
 **Voir l'état du système :**
@@ -174,7 +182,7 @@ forge script script/Demo.s.sol --sig "deposit(uint256)" $(cast to-wei 4) $ENVOI
 **Provoquer une liquidation.** Il faut un second emprunt, risqué, ouvert depuis un second portefeuille. Sur anvil, `ENVOI2` est déjà prêt. Sur Sepolia, crée un second portefeuille (`cast wallet new`, puis `cast wallet import menger-test-2 --interactive`), envoie-lui un peu d'ETH de test, et prépare ses réglages :
 
 ```bash
-export ENVOI2="--rpc-url $RPC_URL --broadcast --gas-estimate-multiplier 200 --account menger-test-2"
+export ENVOI2="--rpc-url $RPC_URL --broadcast --gas-estimate-multiplier 500 --account menger-test-2"
 ```
 
 Ouvre avec lui un emprunt à environ 112 % : 0,75 ETH pour 5 Mengers, l'ETH étant à 4 000 $.
@@ -225,7 +233,7 @@ Le système considère qu'une source dont le prix saute de plus de 50 % d'un cou
 | Message | Cause |
 |---|---|
 | `DRY RUN: nothing was deployed` | Il manque `--rpc-url` ou `--broadcast` : utilise `$ENVOI`. |
-| `Transaction Failure` ou `out of gas` | Il manque `--gas-estimate-multiplier 200`. |
+| `Transaction Failure` ou `out of gas` | Marge de gaz trop faible : `--gas-estimate-multiplier 200` pour le déploiement, 500 pour les actions de démonstration sur Sepolia. |
 | `call to non-contract address` | Le fichier `deployments/` ne correspond pas au réseau : par exemple, anvil a été relancé. Redéploie. |
 | `insufficient funds` | Pas assez d'ETH de test sur le portefeuille. |
 | `ICR < MCR is not permitted` | La garantie ne couvre pas 110 % de la dette : mets plus d'ETH ou emprunte moins. |
