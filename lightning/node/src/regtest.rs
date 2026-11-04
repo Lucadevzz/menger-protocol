@@ -79,7 +79,9 @@ impl Bitcoind {
         let auth = format!("{}:{}", self.user, self.password);
         let header = format!("Basic {}", base64(auth.as_bytes()));
         let body = json!({"jsonrpc": "1.0", "id": "menger", "method": method, "params": params});
-        let resp = ureq::post(&url).set("Authorization", &header).timeout(Duration::from_secs(30)).send_json(body);
+        // A local node: never through a proxy, whatever the environment says.
+        let agent = ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(Duration::from_secs(30)).build();
+        let resp = agent.post(&url).set("Authorization", &header).send_json(body);
         let v: Value = match resp {
             Ok(r) => r.into_json()?,
             Err(ureq::Error::Status(_, r)) => r.into_json()?,
