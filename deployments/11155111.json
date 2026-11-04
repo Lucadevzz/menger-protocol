@@ -1,0 +1,22 @@
+{
+  "activePool": "0x51EE3b366E2F63A2208C575261D3d81025b0b999",
+  "borrowerOperations": "0x24b488580f2b5b91DCa511E946dAE19573ED9F0a",
+  "chainId": 11155111,
+  "collSurplusPool": "0xfB8a3D31f599629C5b97070ACDc70703ff40277f",
+  "defaultPool": "0xfFF20b98638C1dA38216783bA385e25e8b3C8fE4",
+  "ethUsdPrimary": "0x39ac39D9AB6B9c03Dd324902c590bE0024ed7345",
+  "ethUsdSecondary": "0x1DB0100650aBC13Cd9C7f4c28cD5a8B76b7555C4",
+  "gasPool": "0xDe49e31C2096f6c0C95CBE57eD4d866c85f4e840",
+  "goldMaxAge": 90000,
+  "hintHelpers": "0xA3c33045Af4FF6a361B70EF788C91a5de94C29Ef",
+  "mengerToken": "0xEAd0Cb3Ee0CA8e806ce71541E486c1c8F01a8460",
+  "multiTroveGetter": "0x587Ca0a5B3b23459B9fA6d16B4cE61554281bd40",
+  "priceFeed": "0x018c8eE6d2D7563FADd256e7c4ffBae452f40140",
+  "sortedTroves": "0x09D34b2039244715b31Dd03410cd0D9e4f42ba7a",
+  "stabilityPool": "0xF92CF77154F9Cd2D91EFb4831B5930b2dfaF25BE",
+  "stabilityPoolFeeIssuance": "0x6BAbb0a4FadAdd2C236BE6aD8bf730B7c050fbBA",
+  "testnetFeeds": true,
+  "troveManager": "0x126Aa322361008F89367eAfE885581e11d914299",
+  "xauUsdPrimary": "0x7E44A8eD7181A992f238294057B99D4633a05F23",
+  "xauUsdSecondary": "0x9e0e44f3D8b59d553Bd05aC0A796E7E88CAb8aac"
+}
