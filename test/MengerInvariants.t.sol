@@ -361,6 +361,8 @@ contract MengerInvariantTest is MengerInvariantBase {
         uint market = handler.ethPriceCents() * 1e16;
         uint primary = uint(ethPrimary.answer()) * 1e10;
         if (primary * 2 > market && primary < market * 2) { return; }
+        // Stopped, not yet counted as frozen: followed, as said above, even if the market has moved 50 % meanwhile.
+        if (handler.ethPrimaryFrozen() && block.timestamp - ethPrimary.updatedAt() <= priceFeed.ETH_TIMEOUT()) { return; }
         (uint ethUsd, ) = priceFeed.getEthUsdPrice();
         assertGe(ethUsd, market * 89 / 100);
         assertLe(ethUsd, market * 111 / 100);
