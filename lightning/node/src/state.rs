@@ -25,6 +25,9 @@ pub struct PendingAdjust {
     pub sats_per_menger: SatsPerMenger,
     /// When we last sent it.
     pub sent_at: i64,
+    /// Sent on its own, to add received satoshis to the position: tried again if refused.
+    #[serde(default)]
+    pub automatic: bool,
 }
 
 /// Provider: the last answer given to a saver, sent again if the same request comes back.
@@ -85,6 +88,8 @@ pub struct State {
     pub spend: Option<Spend>,
     /// Saver: satoshis received (or released and not spent) waiting to be added to the position.
     pub to_stabilize_sats: u64,
+    /// Saver: after a refusal, the satoshis to stabilize wait until then.
+    pub stabilize_not_before: Option<i64>,
     pub gold: Option<GoldMemory>,
     /// Hashes of the incoming payments already counted, so that a replayed event is not counted twice.
     pub seen_payments: Vec<String>,

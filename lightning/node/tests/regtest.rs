@@ -257,10 +257,12 @@ fn paying_in_mengers_through_the_provider() {
     tick_until(&mut [&mut provider, &mut alice, &mut bruno], &q0, t, 60, "Alice's position", |n| agreed(n[1], n[0]).is_some());
     println!("   Alice : {} MNGR", format_mengers(mengers(&alice, t)));
 
-    // A saver accepts at most 10 % of a channel the provider opened to it in one payment.
-    println!("4. Bruno demande 0,3 MNGR ; Alice paie sa facture, par le fournisseur.");
-    let (invoice, sats) = bruno.p.invoice(300_000, &q0, t).unwrap();
-    println!("   facture : 0,3 MNGR = {sats} sats");
+    // More than 10 % of the channel the provider opened to Bruno: LDK 0.2 refused that much in one
+    // payment; since LDK 0.3, a private channel accepts payments as large as itself.
+    println!("4. Bruno demande 0,5 MNGR ; Alice paie sa facture, par le fournisseur.");
+    let (invoice, sats) = bruno.p.invoice(500_000, &q0, t).unwrap();
+    println!("   facture : 0,5 MNGR = {sats} sats");
+    assert!(sats > CHANNEL_SATS / 10);
     let alice_sats = alice.p.balance();
     let alice_mengers = mengers(&alice, t);
     alice.p.pay(&invoice, &q0, t).unwrap();
@@ -280,8 +282,8 @@ fn paying_in_mengers_through_the_provider() {
         format_mengers(mengers(&bruno, t))
     );
     assert!(paid >= sats && paid <= sats + 20, "paid {paid} for an invoice of {sats}");
-    assert!(spent_mengers.abs_diff(300_000) <= 3_000, "Alice spent {spent_mengers} µMNGR");
-    assert!(mengers(&bruno, t).abs_diff(300_000) <= 5, "Bruno holds {} µMNGR", mengers(&bruno, t));
+    assert!(spent_mengers.abs_diff(500_000) <= 5_000, "Alice spent {spent_mengers} µMNGR");
+    assert!(mengers(&bruno, t).abs_diff(500_000) <= 5, "Bruno holds {} µMNGR", mengers(&bruno, t));
 
     println!("5. Le bitcoin baisse de 10 % : le fournisseur complète chez les deux.");
     let t1 = t + 600;

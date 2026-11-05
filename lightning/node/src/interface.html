@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Menger</title>
+<style>
+  :root {
+    --bg: #f7f4ec; --card: #ffffff; --ink: #1f1c15; --muted: #6f6858; --line: #e6dfcf;
+    --gold: #94690f; --gold-soft: #f3e7c6; --danger: #b3261e; --danger-soft: #fbe4e2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14130f; --card: #1d1b16; --ink: #f2eee3; --muted: #a69f8d; --line: #34302a;
+      --gold: #d8ab45; --gold-soft: #3a3020; --danger: #f2867c; --danger-soft: #3d1f1c;
+    }
+  }
+  [hidden] { display: none !important; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 600px; margin: 0 auto; padding: 0 16px; }
+  .top { display: flex; justify-content: space-between; align-items: center; padding-top: 14px; padding-bottom: 14px; }
+  .brand { font-weight: 700; font-size: 20px; letter-spacing: .02em; display: flex; align-items: center; gap: 10px; }
+  .coin { width: 22px; height: 22px; border-radius: 50%;
+          background: radial-gradient(circle at 35% 30%, #f6dc8b, #b8860b 60%, #7a5a0b); }
+  .chip { font-size: 13px; padding: 4px 10px; border-radius: 999px; background: var(--gold-soft); color: var(--gold); }
+  .chip.danger { background: var(--danger-soft); color: var(--danger); }
+  .essai { background: var(--gold-soft); border-radius: 16px; padding: 12px 16px; margin-bottom: 14px; font-size: 15px; }
+  .essai a { color: var(--gold); font-weight: 600; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px; margin-bottom: 14px; }
+  .label { color: var(--muted); font-size: 14px; }
+  .big { font-size: 44px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; margin: 2px 0; }
+  .big .unit { font-size: 20px; color: var(--gold); font-weight: 600; }
+  .muted { color: var(--muted); font-size: 14px; }
+  .statuts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .pill { font-size: 13px; padding: 4px 10px; border-radius: 999px; background: var(--bg); border: 1px solid var(--line); }
+  .pill.attention { background: var(--danger-soft); border-color: transparent; color: var(--danger); }
+  .tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 10px; }
+  .tab { padding: 10px 4px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); color: var(--ink);
+         font-weight: 600; font-size: 14px; cursor: pointer; }
+  .tab.active { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  label { display: block; font-weight: 600; margin: 4px 0 6px; }
+  .input-unit { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); padding: 0 12px; }
+  .input-unit input { flex: 1; border: 0; background: transparent; color: var(--ink); font-size: 20px; padding: 12px 0; outline: none; min-width: 0; }
+  .input-unit span { color: var(--muted); font-weight: 600; }
+  textarea { width: 100%; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--ink);
+             padding: 10px 12px; font: 14px/1.4 ui-monospace, Menlo, monospace; resize: vertical; }
+  button { font: inherit; }
+  .card button, .essai button { margin-top: 12px; padding: 11px 16px; border-radius: 12px; border: 1px solid var(--line);
+                                background: var(--card); color: var(--ink); font-weight: 600; cursor: pointer; }
+  .essai button { margin-top: 8px; padding: 7px 12px; font-size: 14px; }
+  button.primary { background: var(--gold); color: #fff; border-color: var(--gold); }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .hint { color: var(--muted); font-size: 14px; margin-top: 6px; min-height: 1.2em; }
+  .resultat { margin-top: 16px; border-top: 1px dashed var(--line); padding-top: 16px; text-align: center; }
+  .qr svg { width: 220px; height: 220px; border-radius: 8px; }
+  .mono { font: 12px/1.4 ui-monospace, Menlo, monospace; word-break: break-all; color: var(--muted); margin-top: 8px; text-align: left; }
+  .montant { font-size: 24px; font-weight: 700; }
+  p { margin: 0 0 10px; }
+  .message { position: sticky; bottom: 12px; padding: 12px 14px; border-radius: 12px; background: var(--ink); color: var(--bg); margin: 10px 0; }
+  .message.erreur { background: var(--danger); color: #fff; }
+  h2 { font-size: 15px; color: var(--muted); font-weight: 600; margin: 18px 0 8px; }
+  ol { list-style: none; padding: 0; margin: 0; }
+  li { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+  time { color: var(--muted); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; padding: 8px 16px 28px; }
+</style>
+</head>
+<body>
+<header class="wrap top">
+  <div class="brand"><span class="coin" aria-hidden="true"></span>Menger</div>
+  <span id="reseau" class="chip"></span>
+</header>
+
+<main class="wrap">
+  <section id="essai" class="essai" hidden>
+    <div>Essai sur un réseau privé : bitcoins et prix fictifs. Bitcoin <b id="essai-btc"></b>, or <b id="essai-or"></b> l'once.</div>
+    <div class="row">
+      <button data-btc="-20">Bitcoin −20 %</button>
+      <button data-btc="-5">−5 %</button>
+      <button data-btc="5">+5 %</button>
+      <button data-btc="20">+20 %</button>
+      <button data-or="5">Or +5 %</button>
+    </div>
+    <div id="essai-autres" class="muted"></div>
+  </section>
+
+  <section class="card">
+    <div class="label" id="qui">Ton solde en or</div>
+    <div class="big"><span id="mengers">…</span> <span class="unit">MNGR</span></div>
+    <div id="grammes"></div>
+    <div class="muted" id="valeur"></div>
+    <div class="statuts" id="statuts"></div>
+  </section>
+
+  <nav class="tabs" id="onglets">
+    <button class="tab active" data-tab="recevoir">Recevoir</button>
+    <button class="tab" data-tab="payer">Payer</button>
+    <button class="tab" data-tab="garder">Épargner</button>
+    <button class="tab" data-tab="deposer">Déposer</button>
+  </nav>
+
+  <section class="card" id="p-recevoir">
+    <label for="montant-recevoir">Montant à recevoir</label>
+    <div class="input-unit"><input id="montant-recevoir" inputmode="decimal" placeholder="0,5" autocomplete="off"><span>MNGR</span></div>
+    <div class="hint" id="aide-recevoir"></div>
+    <button class="primary" id="btn-facture">Créer la facture</button>
+    <div id="facture" class="resultat" hidden>
+      <div class="qr" id="facture-qr"></div>
+      <div class="mono" id="facture-texte"></div>
+      <button id="btn-copier">Copier la facture</button>
+    </div>
+  </section>
+
+  <section class="card" id="p-payer" hidden>
+    <label for="facture-payer">Facture Lightning à payer</label>
+    <p class="muted">Le paiement prend d'abord tes sats libres, puis ton solde en or.</p>
+    <textarea id="facture-payer" rows="3" placeholder="lnbc…" spellcheck="false"></textarea>
+    <button id="btn-verifier">Vérifier</button>
+    <div id="verif" class="resultat" hidden>
+      <div class="montant" id="verif-montant"></div>
+      <div class="muted" id="verif-desc"></div>
+      <button class="primary" id="btn-payer">Payer</button>
+    </div>
+  </section>
+
+  <section class="card" id="p-garder" hidden>
+    <p>Les sats libres suivent le cours du bitcoin. Ceux que tu gardes en or gardent leur valeur en or.</p>
+    <p>Libres : <b id="libres"></b></p>
+    <label for="montant-garder">Sats à garder en or</label>
+    <div class="input-unit"><input id="montant-garder" inputmode="numeric" placeholder="100000" autocomplete="off"><span>sats</span></div>
+    <div class="row">
+      <button class="primary" id="btn-garder">Garder en or</button>
+      <button id="btn-tout">Tout garder en or</button>
+    </div>
+  </section>
+
+  <section class="card" id="p-deposer" hidden>
+    <p id="deposer-texte">Pour commencer, envoie des bitcoins à ton portefeuille, puis ouvre un canal vers ton fournisseur.</p>
+    <p>Sur la chaîne : <b id="chaine"></b></p>
+    <button id="btn-adresse">Afficher une adresse</button>
+    <div id="adresse" class="resultat" hidden>
+      <div class="qr" id="adresse-qr"></div>
+      <div class="mono" id="adresse-texte"></div>
+    </div>
+    <div id="ouvrir" hidden>
+      <label for="montant-canal" style="margin-top:16px">Ouvrir un canal vers ton fournisseur</label>
+      <div class="input-unit"><input id="montant-canal" inputmode="numeric" placeholder="400000" autocomplete="off"><span>sats</span></div>
+      <button id="btn-canal">Ouvrir le canal</button>
+    </div>
+    <p class="muted" id="canaux" style="margin-top:12px"></p>
+  </section>
+
+  <section class="card" id="p-fournisseur" hidden>
+    <table>
+      <thead><tr><th>Épargnant</th><th class="num">MNGR</th><th class="num">Sats chez lui</th><th class="num">Notre côté</th></tr></thead>
+      <tbody id="epargnants"></tbody>
+    </table>
+  </section>
+
+  <div id="message" class="message" role="status" hidden></div>
+
+  <h2>Ce qui s'est passé</h2>
+  <ol id="journal"></ol>
+</main>
+<footer id="noeud"></footer>
+
+<script>
+"use strict";
+const JETON = "__JETON__";
+const nf = new Intl.NumberFormat("fr-CH");
+const n2 = new Intl.NumberFormat("fr-CH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const n4 = new Intl.NumberFormat("fr-CH", { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+const $ = (id) => document.getElementById(id);
+let etat = null;
+let aPayer = null;
+
+// Every value from the node is shown with textContent: a message from another node can never
+// become part of the page.
+async function api(chemin, corps) {
+  const options = { method: corps === undefined ? "GET" : "POST", headers: { "x-menger-jeton": JETON } };
+  if (corps !== undefined) {
+    options.headers["content-type"] = "application/json";
+    options.body = JSON.stringify(corps);
+  }
+  const reponse = await fetch(chemin, options);
+  let donnees = {};
+  try { donnees = await reponse.json(); } catch (_) { /* empty answer */ }
+  if (!reponse.ok) throw new Error(donnees.erreur || "erreur " + reponse.status);
+  return donnees;
+}
+
+const mengers = (micro) => n4.format(micro / 1e6);
+const sats = (n) => nf.format(n) + " sats";
+const heure = (at) => new Date(at * 1000).toLocaleTimeString("fr-CH", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+function message(texte, erreur) {
+  const m = $("message");
+  m.textContent = texte;
+  m.className = "message" + (erreur ? " erreur" : "");
+  m.hidden = !texte;
+  clearTimeout(message.minuterie);
+  if (texte) message.minuterie = setTimeout(() => { m.hidden = true; }, 9000);
+}
+
+async function action(bouton, travail) {
+  bouton.disabled = true;
+  try { await travail(); } catch (e) { message(e.message, true); }
+  finally { bouton.disabled = false; rafraichir(); }
+}
+
+function pastille(texte, attention) {
+  const s = document.createElement("span");
+  s.className = "pill" + (attention ? " attention" : "");
+  s.textContent = texte;
+  return s;
+}
+
+function afficherJournal(s) {
+  const liste = $("journal");
+  liste.replaceChildren();
+  for (const e of s.journal) {
+    const li = document.createElement("li");
+    const t = document.createElement("time");
+    t.textContent = heure(e.at);
+    const texte = document.createElement("span");
+    texte.textContent = e.texte;
+    li.append(t, texte);
+    liste.append(li);
+  }
+  if (!s.journal.length) {
+    const li = document.createElement("li");
+    li.textContent = "Rien pour l'instant.";
+    liste.append(li);
+  }
+}
+
+function afficherEssai(s) {
+  $("essai").hidden = !s.essai;
+  if (!s.essai) return;
+  $("essai-btc").textContent = nf.format(Math.round(s.essai.btc_usd)) + " $";
+  $("essai-or").textContent = nf.format(Math.round(s.essai.or_usd)) + " $";
+  const autres = $("essai-autres");
+  autres.replaceChildren();
+  if (s.essai.autres.length) autres.append("Ouvrir aussi la page de : ");
+  s.essai.autres.forEach((a, i) => {
+    if (i) autres.append(", ");
+    const lien = document.createElement("a");
+    lien.href = a.url;
+    lien.textContent = a.nom;
+    autres.append(lien);
+  });
+}
+
+function afficherPrix(s, valeurSats) {
+  const p = s.prix;
+  if (!p) { $("valeur").textContent = ""; return; }
+  const valeur = valeurSats == null ? "" : "≈ " + sats(valeurSats) + " · ";
+  $("valeur").textContent = valeur + "1 MNGR = " + sats(p.sats_par_menger) + " · bitcoin " + nf.format(Math.round(p.btc_usd)) +
+    " $ · or " + nf.format(Math.round(p.or_usd)) + " $ l'once";
+}
+
+function afficher(s) {
+  $("reseau").textContent = s.reseau;
+  $("reseau").classList.toggle("danger", s.vrais_bitcoins);
+  $("noeud").textContent = (s.role === "fournisseur" ? "Fournisseur" : "Épargnant") + " · nœud " + s.noeud.slice(0, 10) + "…";
+  $("chaine").textContent = sats(s.chaine_sats);
+  afficherEssai(s);
+  afficherJournal(s);
+  const statuts = [];
+  if (!s.prix) statuts.push(pastille("Prix en pause : " + (s.prix_erreur || "pas de prix fiable"), true));
+  else if (s.prix.or_du_vendredi) statuts.push(pastille("Week-end : prix de l'or du vendredi"));
+
+  if (s.role === "fournisseur") {
+    document.title = "Menger, fournisseur";
+    $("onglets").hidden = true;
+    for (const p of ["recevoir", "payer", "garder"]) $("p-" + p).hidden = true;
+    $("p-deposer").hidden = false;
+    $("p-fournisseur").hidden = false;
+    $("deposer-texte").textContent = "Tes bitcoins couvrent les baisses du bitcoin face à l'or chez tes épargnants.";
+    const total = s.epargnants.reduce((t, e) => t + e.micro, 0);
+    $("qui").textContent = "Mengers promis à " + s.epargnants.length + " épargnant" + (s.epargnants.length > 1 ? "s" : "");
+    $("mengers").textContent = mengers(total);
+    $("grammes").textContent = n2.format(total / 1e6 * 3.545) + " g d'or";
+    afficherPrix(s, null);
+    const corps = $("epargnants");
+    corps.replaceChildren();
+    for (const e of s.epargnants) {
+      const tr = document.createElement("tr");
+      const cellules = [e.noeud.slice(0, 10) + "…", mengers(e.micro), nf.format(e.sats), nf.format(e.notre_cote_sats)];
+      cellules.forEach((texte, i) => {
+        const td = document.createElement("td");
+        td.textContent = texte;
+        if (i) td.className = "num";
+        tr.append(td);
+      });
+      if (e.ferme) tr.title = e.ferme;
+      corps.append(tr);
+    }
+    $("statuts").replaceChildren(...statuts);
+    return;
+  }
+
+  const st = s.stable;
+  $("qui").textContent = s.nom ? "Solde en or de " + s.nom : "Ton solde en or";
+  document.title = s.nom ? "Menger, " + s.nom : "Menger";
+  $("mengers").textContent = st ? mengers(st.micro) : mengers(0);
+  $("grammes").textContent = st ? n2.format(st.grammes) + " g d'or" : "Rien de gardé en or pour l'instant";
+  afficherPrix(s, st ? st.valeur_sats : null);
+  if (s.canaux.prets === 0) {
+    statuts.push(pastille(s.canaux.en_attente ? "Canal en cours d'ouverture" : "Aucun canal : va dans « Déposer »", !s.canaux.en_attente));
+  }
+  if (s.demande) statuts.push(pastille("En attente de ton fournisseur…"));
+  if (s.paiement) statuts.push(pastille(s.paiement.envoye ? "Paiement en route…" : "Paiement en préparation…"));
+  if (s.a_stabiliser_sats > 0) statuts.push(pastille(sats(s.a_stabiliser_sats) + " bientôt gardés en or"));
+  if (s.libres_sats > 0) statuts.push(pastille(sats(s.libres_sats) + " libres, en bitcoin"));
+  if (s.ferme) statuts.push(pastille("Canaux fermés : " + s.ferme, true));
+  $("statuts").replaceChildren(...statuts);
+  $("libres").textContent = sats(s.libres_sats);
+  $("ouvrir").hidden = !(s.peut_ouvrir_canal && s.canaux.prets + s.canaux.en_attente === 0);
+  $("canaux").textContent = "Canaux avec ton fournisseur : " + s.canaux.prets + " prêt" + (s.canaux.prets > 1 ? "s" : "") +
+    (s.canaux.en_attente ? ", " + s.canaux.en_attente + " en attente de confirmation" : "") + ".";
+}
+
+async function rafraichir() {
+  try {
+    etat = await api("/api/etat");
+    afficher(etat);
+  } catch (e) {
+    message("Le nœud ne répond pas : " + e.message, true);
+  }
+}
+
+document.querySelectorAll(".tab").forEach((bouton) => bouton.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b === bouton));
+  for (const p of ["recevoir", "payer", "garder", "deposer"]) $("p-" + p).hidden = p !== bouton.dataset.tab;
+}));
+
+$("montant-recevoir").addEventListener("input", () => {
+  const v = parseFloat($("montant-recevoir").value.replace(",", "."));
+  const p = etat && etat.prix;
+  $("aide-recevoir").textContent = v > 0 && p
+    ? "≈ " + sats(Math.round(v * p.sats_par_menger)) + " au prix actuel, soit " + n2.format(v * 3.545) + " g d'or"
+    : "";
+});
+
+$("btn-facture").addEventListener("click", () => action($("btn-facture"), async () => {
+  const f = await api("/api/facture", { mengers: $("montant-recevoir").value });
+  $("facture-qr").innerHTML = f.qr; // an SVG drawn by the node from its own invoice
+  $("facture-texte").textContent = f.facture;
+  $("facture").hidden = false;
+  message("Facture de " + mengers(f.micro) + " MNGR (" + sats(f.sats) + "), valable une heure.");
+}));
+
+$("btn-copier").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("facture-texte").textContent);
+    message("Facture copiée.");
+  } catch (_) {
+    message("Copie impossible : sélectionne le texte de la facture.", true);
+  }
+});
+
+$("btn-verifier").addEventListener("click", () => action($("btn-verifier"), async () => {
+  const d = await api("/api/decoder", { facture: $("facture-payer").value });
+  if (d.sats == null) throw new Error("Cette facture n'indique pas de montant.");
+  if (d.expiree) throw new Error("Cette facture a expiré.");
+  aPayer = d.facture;
+  $("verif-montant").textContent = (d.micro != null ? mengers(d.micro) + " MNGR · " : "") + sats(d.sats);
+  $("verif-desc").textContent = d.description || "Sans description";
+  $("verif").hidden = false;
+}));
+
+$("btn-payer").addEventListener("click", () => action($("btn-payer"), async () => {
+  await api("/api/payer", { facture: aPayer });
+  $("verif").hidden = true;
+  $("facture-payer").value = "";
+  aPayer = null;
+  message("Paiement en préparation : il part dès que ton fournisseur a libéré les sats.");
+}));
+
+$("btn-garder").addEventListener("click", () => action($("btn-garder"), async () => {
+  const n = parseInt($("montant-garder").value.replace(/[\s']/g, ""), 10);
+  if (!(n > 0)) throw new Error("Indique un nombre de sats.");
+  await api("/api/stabiliser", { sats: n });
+  $("montant-garder").value = "";
+  message("Demande envoyée à ton fournisseur.");
+}));
+
+$("btn-tout").addEventListener("click", () => action($("btn-tout"), async () => {
+  const r = await api("/api/stabiliser", { tout: true });
+  message("Demande envoyée : " + sats(r.sats) + " à garder en or.");
+}));
+
+$("btn-adresse").addEventListener("click", () => action($("btn-adresse"), async () => {
+  const a = await api("/api/adresse", {});
+  $("adresse-qr").innerHTML = a.qr; // an SVG drawn by the node from its own address
+  $("adresse-texte").textContent = a.adresse;
+  $("adresse").hidden = false;
+}));
+
+$("btn-canal").addEventListener("click", () => action($("btn-canal"), async () => {
+  const n = parseInt($("montant-canal").value.replace(/[\s']/g, ""), 10);
+  if (!(n > 0)) throw new Error("Indique un nombre de sats.");
+  await api("/api/canal", { sats: n });
+  message("Canal demandé : il sera prêt après sa confirmation sur la chaîne.");
+}));
+
+document.querySelectorAll("[data-btc], [data-or]").forEach((bouton) => bouton.addEventListener("click", () =>
+  action(bouton, () => api("/api/marche", bouton.dataset.btc
+    ? { btc_pct: Number(bouton.dataset.btc) }
+    : { or_pct: Number(bouton.dataset.or) }))));
+
+rafraichir();
+setInterval(rafraichir, 3000);
+</script>
+</body>
+</html>

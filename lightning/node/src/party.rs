@@ -5,6 +5,7 @@
 //! does what the rules say: pay, wait, or leave. A saver can also pay anyone on Lightning from its
 //! balance, through its provider, and add what it receives to its stable balance.
 
+use crate::keys;
 use crate::state::{Answer, InFlight, PeerState, PendingAdjust, Spend, State};
 use anyhow::{anyhow, bail, Context, Result};
 use ldk_node::bitcoin::secp256k1::PublicKey;
@@ -21,7 +22,7 @@ use menger_core::stability::{
     adjust, apply_payment, check_adjust, decide, Action, AdjustRequest, AdjustRules, CloseReason, Decision, Params,
     Position, Role, Snapshot,
 };
-use menger_core::unit::format_mengers;
+use menger_core::unit::{format_mengers_fr, format_sats_fr as sats_fr};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -30,6 +31,8 @@ use std::str::FromStr;
 pub const RESEND_SECS: i64 = 60;
 /// Saver: smaller amounts are not worth a change of position.
 pub const MIN_ADJUST_SATS: u64 = 1_000;
+/// Saver: satoshis that the provider refused to add to the position are offered again after this.
+pub const RETRY_REFUSED_SECS: i64 = 300;
 /// Provider: how far a saver's balance may fall short of the backing it claims, for the satoshi
 /// that each message carries.
 const MESSAGE_TOLERANCE_SATS: u64 = 10;
@@ -66,6 +69,8 @@ pub struct PartyConfig {
     pub min_coverage_ppm: u64,
     /// Saver: add the satoshis it receives to its stable balance.
     pub auto_stabilize: bool,
+    /// Restore the wallet from this recovery phrase (only in a folder that has no wallet yet).
+    pub restore_phrase: Option<String>,
 }
 
 impl PartyConfig {
@@ -83,6 +88,7 @@ impl PartyConfig {
             adjust_rules: AdjustRules::default(),
             min_coverage_ppm: 300_000,
             auto_stabilize: true,
+            restore_phrase: None,
         }
     }
 }
@@ -111,6 +117,8 @@ pub struct Party {
     pub node: Node,
     pub state: State,
     state_path: PathBuf,
+    /// The recovery phrase, when this start created it: to be shown once to its owner.
+    pub new_phrase: Option<String>,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -122,13 +130,17 @@ fn payment_hex(id: &PaymentId) -> String {
 }
 
 fn signed_mengers(micro: i64) -> String {
-    format!("{}{}", if micro < 0 { "-" } else { "+" }, format_mengers(micro.unsigned_abs()))
+    format!("{}{}", if micro < 0 { "−" } else { "+" }, format_mengers_fr(micro.unsigned_abs()))
+}
+
+fn signed_sats(sats: i64) -> String {
+    format!("{}{}", if sats < 0 { "−" } else { "+" }, sats_fr(sats.unsigned_abs()))
 }
 
 /// Why a party leaves, in words.
 pub fn close_reason_text(reason: &CloseReason) -> String {
     match reason {
-        CloseReason::Unpaid { owed_sats } => format!("l'autre partie ne paie pas les {owed_sats} sats qu'elle doit"),
+        CloseReason::Unpaid { owed_sats } => format!("l'autre partie ne paie pas les {} sats qu'elle doit", sats_fr(*owed_sats)),
         CloseReason::ProviderCannotCover { coverage_ppm } => format!(
             "le fournisseur ne couvre plus qu'une baisse de {} % du bitcoin face à l'or",
             coverage_ppm / 10_000
@@ -145,12 +157,15 @@ impl Party {
     /// Starts the Lightning node and loads the saved state.
     pub fn start(cfg: PartyConfig) -> Result<Party> {
         std::fs::create_dir_all(&cfg.data_dir).with_context(|| format!("creating {}", cfg.data_dir.display()))?;
+        let keys = keys::load_or_create(&cfg.data_dir, cfg.restore_phrase.as_deref())?;
         let mut builder = Builder::new();
         builder.set_network(cfg.network);
         builder.set_storage_dir_path(cfg.data_dir.join("ldk").to_string_lossy().into_owned());
         match &cfg.chain {
             ChainSource::BitcoindRpc { host, port, user, password } => {
-                builder.set_chain_source_bitcoind_rpc(host.clone(), *port, user.clone(), password.clone());
+                // A restored wallet looks for its coins from the start of the chain.
+                let rescan_from = keys.restored.then_some(0);
+                builder.set_chain_source_bitcoind_rpc(host.clone(), *port, user.clone(), password.clone(), rescan_from);
             }
             ChainSource::Esplora { url } => {
                 builder.set_chain_source_esplora(url.clone(), None);
@@ -160,13 +175,14 @@ impl Party {
         builder.set_listening_addresses(vec![listen]).map_err(|e| anyhow!("{e}"))?;
         if cfg.role == Role::Provider {
             // The provider is its savers' Lightning service provider (LSPS2, bLIP-52). With LDK
-            // Node, this is what lets it forward payments to their private channels and accept
-            // payments as large as the channels. Its just-in-time channels are not used by Menger
-            // yet; should a client ask for one, it pays for the opening.
+            // Node, this is what lets it forward payments to their private channels. Its
+            // just-in-time channels are not used by Menger yet; should a client ask for one, it
+            // pays for the opening.
             //
-            // Savers are deliberately not LSPS2 clients: that would make them accept the
-            // provider's channels before they confirm, and so trust it not to double-spend them.
-            builder.set_liquidity_provider_lsps2(LSPS2ServiceConfig {
+            // Savers are deliberately not LSPS2 clients: they do not accept the provider's
+            // channels before they confirm, and so never trust it not to double-spend them. Since
+            // LDK 0.3 they accept payments as large as a private channel all the same.
+            builder.enable_liquidity_provider(LSPS2ServiceConfig {
                 require_token: None,
                 advertise_service: false,
                 channel_opening_fee_ppm: 10_000,
@@ -177,16 +193,17 @@ impl Party {
                 min_payment_size_msat: 10_000_000,
                 max_payment_size_msat: 100_000_000_000,
                 client_trusts_lsp: false,
+                disable_client_reserve: false,
             });
         }
-        let node = builder.build().map_err(|e| anyhow!("building the Lightning node: {e}"))?;
+        let node = builder.build(keys.entropy).map_err(|e| anyhow!("building the Lightning node: {e}"))?;
         node.start().map_err(|e| anyhow!("starting the Lightning node: {e}"))?;
         let state_path = cfg.data_dir.join("menger-state.json");
         let mut state = State::load(&state_path)?;
         if let (Role::Saver, Some((key, _)), None) = (cfg.role, &cfg.provider, &state.provider) {
             state.provider = Some(key.to_string());
         }
-        Ok(Party { cfg, node, state, state_path })
+        Ok(Party { cfg, node, state, state_path, new_phrase: keys.new_phrase })
     }
 
     pub fn stop(self) -> Result<()> {
@@ -254,18 +271,33 @@ impl Party {
     /// confirm. (With an Esplora server the wallet lists it as soon as it syncs; with a Bitcoin
     /// Core node, only once it confirms.)
     pub fn opening_in_progress(&self) -> bool {
-        let known: Vec<Txid> = self
+        let pending: Vec<Option<Txid>> = self
             .node
-            .list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }))
-            .into_iter()
-            .filter_map(|p| match p.kind {
+            .list_channels()
+            .iter()
+            .filter(|c| c.is_outbound && c.confirmations.unwrap_or(0) == 0)
+            .map(|c| c.funding_txo.map(|o| o.txid))
+            .collect();
+        if pending.is_empty() {
+            return false;
+        }
+        if pending.iter().any(Option::is_none) {
+            return true;
+        }
+        let mut known = Vec::new();
+        let mut token = None;
+        loop {
+            let Ok(page) = self.node.list_payments(token.take()) else { return true };
+            known.extend(page.payments.iter().filter_map(|p| match p.kind {
                 PaymentKind::Onchain { txid, .. } => Some(txid),
                 _ => None,
-            })
-            .collect();
-        self.node.list_channels().iter().any(|c| {
-            c.is_outbound && c.confirmations.unwrap_or(0) == 0 && c.funding_txo.is_none_or(|o| !known.contains(&o.txid))
-        })
+            }));
+            match page.next_page_token {
+                Some(next) => token = Some(next),
+                None => break,
+            }
+        }
+        pending.iter().flatten().any(|txid| !known.contains(txid))
     }
 
     /// Connects to another party and opens a channel funded with our own bitcoin. One opening at
@@ -276,7 +308,7 @@ impl Party {
         }
         let addr = SocketAddress::from_str(address).map_err(|_| anyhow!("invalid address {address}"))?;
         self.node.connect(peer, addr.clone(), true).map_err(|e| anyhow!("connecting: {e}"))?;
-        self.node.open_channel(peer, addr, sats, None, None).map_err(|e| anyhow!("opening channel: {e}"))?;
+        self.node.open_channel(peer, addr, sats, None, None, None).map_err(|e| anyhow!("opening channel: {e}"))?;
         self.peer_mut(&peer);
         if self.cfg.role == Role::Saver && self.state.provider.is_none() {
             self.state.provider = Some(peer.to_string());
@@ -286,7 +318,7 @@ impl Party {
 
     /// Usable channels with `peer`.
     pub fn channels_with(&self, peer: &PublicKey) -> Vec<ChannelDetails> {
-        self.node.list_channels().into_iter().filter(|c| c.counterparty_node_id == *peer && c.is_usable).collect()
+        self.node.list_channels().into_iter().filter(|c| c.counterparty.node_id == *peer && c.is_usable).collect()
     }
 
     /// Largest single payment we can send to `peer` now.
@@ -303,7 +335,7 @@ impl Party {
     pub fn their_balance(&self, peer: &PublicKey) -> u64 {
         self.channels_with(peer)
             .iter()
-            .map(|c| c.inbound_capacity_msat / 1000 + c.counterparty_unspendable_punishment_reserve)
+            .map(|c| c.inbound_capacity_msat / 1000 + c.counterparty.unspendable_punishment_reserve)
             .sum()
     }
 
@@ -327,6 +359,13 @@ impl Party {
                 _ => 0,
             })
             .sum()
+    }
+
+    /// True while a payment is under way in a channel with `peer`: balances are not settled.
+    pub fn payments_under_way(&self, peer: &PublicKey) -> bool {
+        self.node.list_channels().iter().any(|c| {
+            c.counterparty.node_id == *peer && !(c.pending_inbound_htlcs.is_empty() && c.pending_outbound_htlcs.is_empty())
+        })
     }
 
     /// Saver: our balance with our provider.
@@ -359,12 +398,12 @@ impl Party {
 
     /// Saver: adds `sats` of our channel balance to the stable position, or opens it.
     pub fn stabilize(&mut self, sats: u64, quotes: &[Quote], now: i64) -> Result<()> {
-        self.request_adjust(sats as i64, quotes, now)
+        self.request_adjust(sats as i64, false, quotes, now)
     }
 
     /// Saver: asks the provider to grow (positive) or shrink (negative) the position by this many
     /// satoshis, valued at our own price. Nothing changes until the provider accepts.
-    fn request_adjust(&mut self, delta_backing: i64, quotes: &[Quote], now: i64) -> Result<()> {
+    fn request_adjust(&mut self, delta_backing: i64, automatic: bool, quotes: &[Quote], now: i64) -> Result<()> {
         if self.cfg.role != Role::Saver {
             bail!("seul un épargnant change sa position");
         }
@@ -380,10 +419,10 @@ impl Party {
         let backing = peer.position.as_ref().map_or(0, |p| p.backing_sats);
         let balance = self.balance_with(&provider);
         if delta_backing > 0 && backing + delta_backing as u64 > balance {
-            bail!("pas assez de sats dans les canaux : {balance} détenus, dont {backing} déjà stables");
+            bail!("pas assez de sats dans les canaux : {} détenus, dont {} déjà en or", sats_fr(balance), sats_fr(backing));
         }
         if delta_backing < 0 && delta_backing.unsigned_abs() > backing {
-            bail!("la position ne contient que {backing} sats");
+            bail!("le solde en or ne contient que {} sats", sats_fr(backing));
         }
         let micro = price.sats_per_menger.micro_for(delta_backing.unsigned_abs()) as i64;
         let delta_micro = if delta_backing < 0 { -micro } else { micro };
@@ -398,12 +437,16 @@ impl Party {
             rate_ppm_per_year: rate,
             sats_per_menger: price.sats_per_menger,
             sent_at: now,
+            automatic,
         };
         self.send_adjust(provider, &pending)?;
         let peer = self.peer_mut(&provider);
         peer.pending = Some(pending);
         peer.last_request_at = Some(at);
-        self.state.note(now, format!("demande au fournisseur : {} MNGR ({delta_backing:+} sats)", signed_mengers(delta_micro)));
+        self.state.note(
+            now,
+            format!("demande au fournisseur : {} MNGR ({} sats)", signed_mengers(delta_micro), signed_sats(delta_backing)),
+        );
         self.save()
     }
 
@@ -424,7 +467,7 @@ impl Party {
         let price = self.price(quotes, now).map_err(|e| anyhow!("pas de prix : {e}"))?;
         let sats = price.sats_per_menger.sats_for(micro);
         let description =
-            Description::new(format!("Menger : {} MNGR", format_mengers(micro))).map_err(|e| anyhow!("{e:?}"))?;
+            Description::new(format!("Menger : {} MNGR", format_mengers_fr(micro))).map_err(|e| anyhow!("{e:?}"))?;
         let invoice = self
             .node
             .bolt11_payment()
@@ -455,7 +498,7 @@ impl Party {
         let need = sats + fee_margin(sats);
         let release = need.saturating_sub(balance.saturating_sub(backing));
         if release > backing {
-            bail!("solde insuffisant : {balance} sats dans les canaux, {need} nécessaires");
+            bail!("solde insuffisant : {} sats dans les canaux, {} nécessaires", sats_fr(balance), sats_fr(need));
         }
         self.state.spend = Some(Spend {
             invoice: invoice.trim().to_string(),
@@ -465,7 +508,7 @@ impl Party {
             payment_id: None,
         });
         if release > 0 {
-            if let Err(e) = self.request_adjust(-(release as i64), quotes, now) {
+            if let Err(e) = self.request_adjust(-(release as i64), false, quotes, now) {
                 self.state.spend = None;
                 self.save()?;
                 return Err(e);
@@ -496,7 +539,7 @@ impl Party {
                     .and_then(|invoice| self.node.bolt11_payment().send(&invoice, None).map_err(|e| anyhow!("{e}")));
                 match sent {
                     Ok(id) => {
-                        report.events.push(format!("paiement de {} sats envoyé", spend.sats));
+                        report.events.push(format!("paiement de {} sats envoyé", sats_fr(spend.sats)));
                         self.state.spend = Some(Spend { payment_id: Some(payment_hex(&id)), ..spend });
                     }
                     Err(e) => {
@@ -507,17 +550,21 @@ impl Party {
                 }
             }
         }
-        // Satoshis received, or released and not spent, join the position.
+        // Satoshis received, or released and not spent, join the position. The free satoshis are
+        // measured once no payment is under way with the provider: during one, the balance is
+        // not settled yet.
         let idle =
             self.state.spend.is_none() && self.peer(&provider).is_none_or(|p| p.pending.is_none() && p.closed.is_none());
-        if idle && self.state.to_stabilize_sats > 0 {
+        let settled = !self.payments_under_way(&provider);
+        let due = self.state.stabilize_not_before.is_none_or(|t| now >= t);
+        if idle && settled && due && self.state.to_stabilize_sats > 0 {
             let sats = self.state.to_stabilize_sats.min(self.free_sats());
             self.state.to_stabilize_sats = sats;
             if sats >= MIN_ADJUST_SATS {
-                match self.request_adjust(sats as i64, quotes, now) {
+                match self.request_adjust(sats as i64, true, quotes, now) {
                     Ok(()) => {
                         self.state.to_stabilize_sats = 0;
-                        report.events.push(format!("{sats} sats à ajouter à la position : demande envoyée"));
+                        report.events.push(format!("{} sats à garder en or : demande envoyée", sats_fr(sats)));
                     }
                     Err(e) => report.events.push(format!("stabilisation remise à plus tard : {e:#}")),
                 }
@@ -611,7 +658,7 @@ impl Party {
                     Body::Stability { sats_per_menger: price.sats_per_menger, backing_after },
                 )?;
                 self.peer_mut(&peer_key).in_flight = Some(InFlight { payment_id: payment_hex(&id), sats: *sats });
-                report.events.push(format!("paiement de stabilité envoyé : {sats} sats"));
+                report.events.push(format!("paiement de stabilité envoyé : {} sats", sats_fr(*sats)));
             }
             Action::Close { reason } => {
                 let why = close_reason_text(reason);
@@ -625,7 +672,7 @@ impl Party {
 
     /// Closes every channel with `peer`, cooperatively if possible.
     pub fn close_with(&mut self, peer: &PublicKey, reason: &str) -> Result<()> {
-        for c in self.node.list_channels().into_iter().filter(|c| c.counterparty_node_id == *peer) {
+        for c in self.node.list_channels().into_iter().filter(|c| c.counterparty.node_id == *peer) {
             if self.node.close_channel(&c.user_channel_id, *peer).is_err() {
                 self.node
                     .force_close_channel(&c.user_channel_id, *peer, Some(reason.to_string()))
@@ -638,7 +685,7 @@ impl Party {
     fn handle_event(&mut self, event: Event, quotes: &[Quote], now: i64, report: &mut Report) -> Result<()> {
         let role = self.cfg.role;
         match event {
-            Event::PaymentSuccessful { payment_id: Some(id), fee_paid_msat, .. } => {
+            Event::PaymentSuccessful { payment_id: id, fee_paid_msat, .. } => {
                 let id = payment_hex(&id);
                 for peer in self.state.peers.values_mut() {
                     if peer.in_flight.as_ref().is_some_and(|f| f.payment_id == id) {
@@ -647,7 +694,7 @@ impl Party {
                             apply_payment(pos, f.sats, role == Role::Provider);
                         }
                         peer.last_payment_at = Some(now);
-                        report.events.push(format!("paiement de stabilité arrivé : {} sats", f.sats));
+                        report.events.push(format!("paiement de stabilité arrivé : {} sats", sats_fr(f.sats)));
                     }
                 }
                 if self.state.spend.as_ref().and_then(|s| s.payment_id.as_deref()) == Some(id.as_str()) {
@@ -655,10 +702,10 @@ impl Party {
                     let fee = fee_paid_msat.unwrap_or(0).div_ceil(1000);
                     // What the margin for fees did not spend returns to the position.
                     self.state.to_stabilize_sats += fee_margin(spend.sats).saturating_sub(fee).min(spend.released_backing);
-                    report.events.push(format!("paiement réussi : {} sats, frais de routage {fee} sats", spend.sats));
+                    report.events.push(format!("paiement réussi : {} sats, frais de routage {} sats", sats_fr(spend.sats), sats_fr(fee)));
                 }
             }
-            Event::PaymentFailed { payment_id: Some(id), reason, .. } => {
+            Event::PaymentFailed { payment_id: id, reason, .. } => {
                 let id = payment_hex(&id);
                 for peer in self.state.peers.values_mut() {
                     if peer.in_flight.as_ref().is_some_and(|f| f.payment_id == id) {
@@ -682,7 +729,7 @@ impl Party {
                     Some(e) => self.handle_message(e, amount_msat, quotes, now, report)?,
                     None => {
                         let sats = amount_msat / 1000;
-                        report.events.push(format!("paiement reçu : {sats} sats"));
+                        report.events.push(format!("paiement reçu : {} sats", sats_fr(sats)));
                         if role == Role::Saver && self.cfg.auto_stabilize {
                             self.state.to_stabilize_sats += sats;
                         }
@@ -692,8 +739,8 @@ impl Party {
             Event::PaymentForwarded { outbound_amount_forwarded_msat, total_fee_earned_msat, .. } => {
                 report.events.push(format!(
                     "paiement transmis : {} sats (frais gagnés : {} sats)",
-                    outbound_amount_forwarded_msat.unwrap_or(0) / 1000,
-                    total_fee_earned_msat.unwrap_or(0) / 1000
+                    sats_fr(outbound_amount_forwarded_msat / 1000),
+                    sats_fr(total_fee_earned_msat.unwrap_or(0) / 1000)
                 ));
             }
             Event::ChannelReady { counterparty_node_id: Some(peer), .. } => {
@@ -794,6 +841,11 @@ impl Party {
                         self.state.spend = None;
                         report.events.push("paiement annulé".into());
                     }
+                    if pending.automatic && pending.delta_backing > 0 {
+                        // Received satoshis are not forgotten: they are offered again later.
+                        self.state.to_stabilize_sats += pending.delta_backing as u64;
+                        self.state.stabilize_not_before = Some(now + RETRY_REFUSED_SECS);
+                    }
                 }
             }
             Body::Stability { sats_per_menger, .. } => {
@@ -804,17 +856,18 @@ impl Party {
                         // From the other side: the provider pays the saver, or the saver the provider.
                         apply_payment(pos, sats, role == Role::Saver);
                         report.events.push(format!(
-                            "paiement de stabilité reçu : {sats} sats (prix du payeur : {} sats par Menger)",
-                            sats_per_menger.0
+                            "paiement de stabilité reçu : {} sats (prix du payeur : {} sats par Menger)",
+                            sats_fr(sats),
+                            sats_fr(sats_per_menger.0)
                         ));
                     }
                     // The provider opened the position and paid at once; its answer is still on
                     // the way. Counted when it arrives, as the provider counted it.
                     None if role == Role::Saver && peer.pending.is_some() => {
                         peer.early_stability_sats += sats;
-                        report.events.push(format!("paiement de stabilité reçu avant l'accord : {sats} sats, comptés à l'ouverture"));
+                        report.events.push(format!("paiement de stabilité reçu avant l'accord : {} sats, comptés à l'ouverture", sats_fr(sats)));
                     }
-                    None => report.events.push(format!("paiement de stabilité sans position : {sats} sats gardés en bitcoin")),
+                    None => report.events.push(format!("paiement de stabilité sans position : {} sats gardés en bitcoin", sats_fr(sats))),
                 }
             }
         }

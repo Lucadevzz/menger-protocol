@@ -54,6 +54,35 @@ pub fn format_mengers(micro: u64) -> String {
     format!("{}.{:06}", micro / MICRO_PER_MENGER, micro % MICRO_PER_MENGER)
 }
 
+/// Mengers written the French way, without trailing zeros: `0,3`, `3,047201`, `2`.
+pub fn format_mengers_fr(micro: u64) -> String {
+    let whole = group_fr(micro / MICRO_PER_MENGER);
+    let frac = format!("{:06}", micro % MICRO_PER_MENGER);
+    let frac = frac.trim_end_matches('0');
+    if frac.is_empty() {
+        whole
+    } else {
+        format!("{whole},{frac}")
+    }
+}
+
+/// Satoshis written the French way: `1 500 000`, with narrow no-break spaces.
+pub fn format_sats_fr(sats: u64) -> String {
+    group_fr(sats)
+}
+
+fn group_fr(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push('\u{202f}');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Grams of gold represented by `micro` micro-Mengers.
 pub fn grams(micro: u64) -> f64 {
     micro as f64 / MICRO_PER_MENGER as f64 * GRAMS_PER_MENGER
@@ -95,6 +124,17 @@ mod tests {
         assert_eq!(SatsPerMenger::from_usd(100_000.0, f64::INFINITY), None);
         // A Menger worth less than one satoshi cannot be represented.
         assert_eq!(SatsPerMenger::from_usd(1e15, 1.0), None);
+    }
+
+    #[test]
+    fn french_amounts() {
+        assert_eq!(format_mengers_fr(300_000), "0,3");
+        assert_eq!(format_mengers_fr(3_047_201), "3,047201");
+        assert_eq!(format_mengers_fr(2_000_000), "2");
+        assert_eq!(format_mengers_fr(0), "0");
+        assert_eq!(format_sats_fr(1_500_000), "1\u{202f}500\u{202f}000");
+        assert_eq!(format_sats_fr(147_677), "147\u{202f}677");
+        assert_eq!(format_sats_fr(999), "999");
     }
 
     #[test]
