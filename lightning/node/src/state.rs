@@ -1,8 +1,9 @@
 //! What a party remembers between runs, in `menger-state.json` next to its Lightning data.
 
 use anyhow::{Context, Result};
-use menger_core::{GoldMemory, Position};
+use menger_core::{GoldMemory, Position, SatsPerMenger};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// A stability payment we sent and that has not completed yet.
@@ -10,6 +11,60 @@ use std::path::Path;
 pub struct InFlight {
     pub payment_id: String,
     pub sats: u64,
+}
+
+/// Saver: a change of position sent to the provider and not answered yet. It is sent again,
+/// unchanged, until the provider answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAdjust {
+    /// Identifies the request; each request uses a later `at` than the one before.
+    pub at: i64,
+    pub delta_micro: i64,
+    pub delta_backing: i64,
+    pub rate_ppm_per_year: i64,
+    pub sats_per_menger: SatsPerMenger,
+    /// When we last sent it.
+    pub sent_at: i64,
+}
+
+/// Provider: the last answer given to a saver, sent again if the same request comes back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Answer {
+    pub at: i64,
+    pub accepted: bool,
+    pub reason: Option<String>,
+}
+
+/// Saver: a payment to someone else, paid once the position has released the satoshis it needs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spend {
+    pub invoice: String,
+    pub sats: u64,
+    /// Satoshis taken out of the position to make this payment (zero when free sats sufficed).
+    pub released_backing: u64,
+    /// The position has released what was needed: the payment can go.
+    pub ready: bool,
+    pub payment_id: Option<String>,
+}
+
+/// Everything about one counterparty: the provider for a saver, each saver for a provider.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PeerState {
+    pub position: Option<Position>,
+    pub pending: Option<PendingAdjust>,
+    /// Saver: `at` of our last request.
+    pub last_request_at: Option<i64>,
+    /// Provider: our last answer to this saver.
+    pub answered: Option<Answer>,
+    /// Saver: stability payments that arrived before the answer that opens the position. They
+    /// count from the moment the position exists.
+    pub early_stability_sats: u64,
+    pub last_payment_at: Option<i64>,
+    pub in_flight: Option<InFlight>,
+    pub owed_to_us_since: Option<i64>,
+    /// Why we closed the channels with this counterparty, if we did.
+    pub closed: Option<String>,
 }
 
 /// One line of the audit trail.
@@ -20,21 +75,18 @@ pub struct Entry {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct State {
-    /// The other party, as a hex public key.
-    pub counterparty: Option<String>,
-    /// The position both parties agreed on.
-    pub position: Option<Position>,
-    /// Saver only: a position proposed and not answered yet.
-    pub proposed: Option<Position>,
-    pub last_payment_at: Option<i64>,
-    pub in_flight: Option<InFlight>,
-    pub owed_to_us_since: Option<i64>,
+    /// Saver: its provider, as a hex node id.
+    pub provider: Option<String>,
+    /// Counterparties by hex node id.
+    pub peers: BTreeMap<String, PeerState>,
+    /// Saver: a payment to someone else in progress.
+    pub spend: Option<Spend>,
+    /// Saver: satoshis received (or released and not spent) waiting to be added to the position.
+    pub to_stabilize_sats: u64,
     pub gold: Option<GoldMemory>,
-    /// Why we closed the channels, if we did.
-    pub closed: Option<String>,
     /// Hashes of the incoming payments already counted, so that a replayed event is not counted twice.
-    #[serde(default)]
     pub seen_payments: Vec<String>,
     /// The most recent events, newest last.
     pub journal: Vec<Entry>,
@@ -91,7 +143,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("menger-state.json");
         assert_eq!(State::load(&path).unwrap(), State::default());
-        let mut s = State { counterparty: Some("02ab".into()), ..State::default() };
+        let mut s = State { provider: Some("02ab".into()), ..State::default() };
+        s.peers.insert("02ab".into(), PeerState { last_payment_at: Some(7), ..PeerState::default() });
         for i in 0..600 {
             s.note(i, format!("event {i}"));
         }

@@ -8,6 +8,7 @@
 //! (financement, ouverture et fermeture des canaux) est la chaîne publique de Mutinynet.
 
 use anyhow::{bail, Result};
+use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::bitcoin::Network;
 use menger_core::price::PriceRules;
 use menger_core::stability::{Action, Params, Role};
@@ -23,7 +24,7 @@ const SAVER_LISTEN: &str = "127.0.0.1:19736";
 const CHANNEL_SATS: u64 = 400_000;
 const STABLE_SATS: u64 = 200_000;
 
-fn start(role: Role, dir: &Path) -> Result<Party> {
+fn start(role: Role, dir: &Path, provider: Option<PublicKey>) -> Result<Party> {
     let (name, listen) = match role {
         Role::Saver => ("epargnant", SAVER_LISTEN),
         Role::Provider => ("fournisseur", PROVIDER_LISTEN),
@@ -33,6 +34,7 @@ fn start(role: Role, dir: &Path) -> Result<Party> {
     // Seuils fins pour voir les paiements suivre les petits mouvements réels du prix.
     cfg.params = Params { threshold_ppm: 100, min_payment_sats: 10, cooldown_secs: 30, ..Params::default() };
     cfg.price_rules = PriceRules::default();
+    cfg.provider = provider.map(|key| (key, PROVIDER_LISTEN.to_string()));
     Party::start(cfg)
 }
 
@@ -46,8 +48,9 @@ fn main() -> Result<()> {
         (Some(c), Some(d)) => (c.as_str(), Path::new(d).to_path_buf()),
         _ => bail!("usage : mutinynet adresses|lancer DOSSIER [MINUTES]"),
     };
-    let mut provider = start(Role::Provider, &dir)?;
-    let mut saver = start(Role::Saver, &dir)?;
+    let mut provider = start(Role::Provider, &dir, None)?;
+    let mut saver = start(Role::Saver, &dir, Some(provider.node_id()))?;
+    let (pk_p, pk_s) = (provider.node_id(), saver.node_id());
     provider.sync();
     saver.sync();
     if cmd == "adresses" {
@@ -71,7 +74,7 @@ fn main() -> Result<()> {
     }
     println!("Fonds sur la chaîne : fournisseur {} sats, épargnant {} sats", provider.onchain_spendable_sats(), saver.onchain_spendable_sats());
 
-    if provider.channels().is_empty() && saver.channels().is_empty() && provider.node.list_channels().is_empty() {
+    if provider.node.list_channels().is_empty() {
         saver.open_channel(provider.node_id(), PROVIDER_LISTEN, CHANNEL_SATS)?;
         provider.open_channel(saver.node_id(), SAVER_LISTEN, CHANNEL_SATS)?;
         println!("Canaux demandés : {CHANNEL_SATS} sats de chaque côté. Attente des confirmations (un bloc toutes les 30 s)…");
@@ -79,7 +82,7 @@ fn main() -> Result<()> {
     let t = now();
     let (q, _) = prices::read_all(&sources, t);
     let deadline = Instant::now() + Duration::from_secs(1_200);
-    while saver.channels().len() < 2 || provider.channels().len() < 2 {
+    while saver.channels_with(&pk_p).len() < 2 || provider.channels_with(&pk_s).len() < 2 {
         if Instant::now() > deadline {
             bail!("canaux pas prêts après 20 minutes");
         }
@@ -96,16 +99,16 @@ fn main() -> Result<()> {
         }
     }
 
-    if saver.state.position.is_none() {
+    if saver.position().is_none() {
         let t = now();
         let (q, errors) = prices::read_all(&sources, t);
         for e in errors {
             println!("  source indisponible : {e}");
         }
-        let p = saver.propose(STABLE_SATS, &q, t)?;
-        println!("Position proposée : {} MNGR ({:.3} g d'or) pour {STABLE_SATS} sats", format_mengers(p.micro_at_start), grams(p.micro_at_start));
+        saver.stabilize(STABLE_SATS, &q, t)?;
+        println!("Demande au fournisseur : garder {STABLE_SATS} sats stables en or");
         let deadline = Instant::now() + Duration::from_secs(120);
-        while saver.state.position.is_none() || provider.state.position.is_none() {
+        while saver.position().is_none() || provider.position_with(&pk_s).is_none() {
             if Instant::now() > deadline {
                 bail!("pas d'accord sur la position");
             }
@@ -114,6 +117,8 @@ fn main() -> Result<()> {
                 println!("  {e}");
             }
         }
+        let micro = saver.position().map_or(0, |p| p.micro_at_start);
+        println!("Position acceptée : {} MNGR ({:.3} g d'or)", format_mengers(micro), grams(micro));
     }
 
     println!("\nSuivi en temps réel pendant {minutes} minutes, avec les vrais prix :");
@@ -133,16 +138,16 @@ fn main() -> Result<()> {
             }
             println!("  {e}");
         }
-        match (&rs.price, &rs.decision) {
+        match (&rs.price, rs.peers.first()) {
             (Some(p), Some(d)) => println!(
                 "{} BTC {:.0} $, or {:.2} $/oz ({} sats/MNGR) : promesse {} sats, détenu {} sats, {}",
                 chrono::Utc::now().format("%H:%M:%S"),
                 p.btc_usd,
                 p.xau_usd,
                 p.sats_per_menger.0,
-                d.target_sats,
-                rs.backing_sats.unwrap_or(0),
-                match &d.action {
+                d.decision.target_sats,
+                d.backing_sats,
+                match &d.decision.action {
                     Action::Hold => "équilibre".to_string(),
                     Action::Pay { sats } => format!("l'épargnant paie {sats} sats"),
                     Action::Await { owed_sats, .. } => format!("le fournisseur doit {owed_sats} sats"),
@@ -153,12 +158,12 @@ fn main() -> Result<()> {
         }
         std::thread::sleep(Duration::from_secs(20));
     }
-    let pos = saver.state.position.clone().unwrap();
+    let Some(pos) = saver.position().cloned() else { bail!("pas de position") };
     println!(
         "\nBilan : {payments} paiements de stabilité ; l'épargnant détient {} sats pour {} MNGR ; registres identiques : {}",
         pos.backing_sats,
         format_mengers(pos.micro_mengers(now())),
-        saver.state.position == provider.state.position
+        saver.position() == provider.position_with(&pk_s)
     );
     provider.stop()?;
     saver.stop()?;

@@ -192,9 +192,12 @@ pub fn decide(s: &Snapshot, p: &Params) -> Decision {
         if s.payment_in_flight || cooling {
             return decision(Action::Hold, warning);
         }
-        let sats = owed.min(s.our_spendable_sats);
-        if sats < owed {
-            warning = Some(Warning::CannotPayInFull { owed_sats: owed, spendable_sats: s.our_spendable_sats });
+        // Down to half the tolerance, not to the exact target: two parties whose prices differ by
+        // less than one and a half tolerances never send the difference back and forth.
+        let due = owed - tolerance / 2;
+        let sats = due.min(s.our_spendable_sats);
+        if sats < due {
+            warning = Some(Warning::CannotPayInFull { owed_sats: due, spendable_sats: s.our_spendable_sats });
         }
         if sats < p.min_payment_sats {
             return decision(Action::Hold, warning);
@@ -222,6 +225,95 @@ pub fn apply_payment(position: &mut Position, sats: u64, to_saver: bool) {
     } else {
         position.backing_sats = position.backing_sats.saturating_sub(sats);
     }
+}
+
+/// Applies an accepted adjustment. Both parties call it with the same arguments and get the same
+/// position: the change is added to what each one has recorded, so stability payments that cross
+/// the request on the way are never lost. A position brought to zero ends.
+pub fn adjust(current: Option<&Position>, at: i64, delta_micro: i64, delta_backing: i64, rate_ppm_per_year: i64) -> Option<Position> {
+    let (micro, backing, rate) = match current {
+        Some(p) => (p.micro_mengers(at), p.backing_sats, p.rate_ppm_per_year),
+        None => (0, 0, rate_ppm_per_year),
+    };
+    let micro = (micro as i128 + delta_micro as i128).clamp(0, u64::MAX as i128) as u64;
+    let backing = (backing as i128 + delta_backing as i128).clamp(0, u64::MAX as i128) as u64;
+    if micro == 0 && backing == 0 {
+        return None;
+    }
+    Some(Position { micro_at_start: micro, started_at: at, rate_ppm_per_year: rate, backing_sats: backing })
+}
+
+/// What a provider accepts when a saver asks to change its position.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdjustRules {
+    /// Largest difference between the Mengers asked for and what the satoshis are worth at the
+    /// provider's own price, in millionths. Two honest parties never read exactly the same price.
+    pub tolerance_ppm: u64,
+    /// Largest gap between the saver's announced price and the provider's, in millionths.
+    pub max_price_gap_ppm: u64,
+    /// Lowest price of stability accepted when a position is opened.
+    pub min_rate_ppm_per_year: i64,
+    /// Largest gap between the request's time and the provider's clock, in seconds.
+    pub max_clock_skew_secs: i64,
+}
+
+impl Default for AdjustRules {
+    fn default() -> Self {
+        AdjustRules { tolerance_ppm: 5_000, max_price_gap_ppm: 10_000, min_rate_ppm_per_year: 0, max_clock_skew_secs: 600 }
+    }
+}
+
+/// A requested change of position, as the saver sends it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdjustRequest {
+    pub at: i64,
+    pub delta_micro: i64,
+    pub delta_backing: i64,
+    pub rate_ppm_per_year: i64,
+    pub their_price: SatsPerMenger,
+}
+
+/// The provider's checks, at its own price. The provider never promises more Mengers than the
+/// satoshis added are worth, and never lets satoshis go back for fewer Mengers than they are worth.
+pub fn check_adjust(
+    current: Option<&Position>,
+    req: &AdjustRequest,
+    own_price: SatsPerMenger,
+    now: i64,
+    rules: &AdjustRules,
+) -> Result<(), String> {
+    if (req.at - now).abs() > rules.max_clock_skew_secs {
+        return Err("heure de la demande trop éloignée de la nôtre".into());
+    }
+    match current {
+        Some(p) if p.rate_ppm_per_year != req.rate_ppm_per_year => {
+            return Err("le prix de la stabilité ne change pas en cours de route".into())
+        }
+        None if req.rate_ppm_per_year < rules.min_rate_ppm_per_year => {
+            return Err(format!("prix de la stabilité trop bas (minimum {} ppm par an)", rules.min_rate_ppm_per_year))
+        }
+        _ => {}
+    }
+    let gap = (own_price.0 as i128 - req.their_price.0 as i128).unsigned_abs() * 1_000_000 / own_price.0.max(1) as u128;
+    if gap > rules.max_price_gap_ppm as u128 {
+        return Err(format!("prix trop différent du nôtre ({gap} ppm)"));
+    }
+    if (req.delta_micro > 0 && req.delta_backing < 0) || (req.delta_micro < 0 && req.delta_backing > 0) {
+        return Err("une position ne grandit pas d'un côté en rétrécissant de l'autre".into());
+    }
+    let worth = own_price.micro_for(req.delta_backing.unsigned_abs()) as i128;
+    let tol = rules.tolerance_ppm as i128;
+    let micro = req.delta_micro as i128;
+    if micro > 0 && micro > worth * (1_000_000 + tol) / 1_000_000 + 1 {
+        return Err("trop de Mengers demandés pour ces sats".into());
+    }
+    if micro < 0 && -micro < worth * (1_000_000 - tol) / 1_000_000 - 1 {
+        return Err("trop peu de Mengers rendus pour ces sats".into());
+    }
+    if req.delta_backing < 0 && req.delta_backing.unsigned_abs() > current.map_or(0, |p| p.backing_sats) {
+        return Err("plus de sats retirés que la position n'en contient".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -274,7 +366,8 @@ mod tests {
         let target = price.sats_for(2 * MICRO_PER_MENGER);
         let excess = pos.backing_sats - target;
         let saver = decide(&snap(Role::Saver, &pos, price, T0), &Params::default());
-        assert_eq!(saver.action, Action::Pay { sats: excess });
+        // Down to half the 0.1 % tolerance.
+        assert_eq!(saver.action, Action::Pay { sats: excess - target / 2_000 });
         let provider = decide(&snap(Role::Provider, &pos, price, T0), &Params::default());
         assert_eq!(provider.action, Action::Await { owed_sats: excess, since: T0 });
     }
@@ -283,9 +376,10 @@ mod tests {
     fn bitcoin_down_the_provider_pays() {
         let pos = position(2);
         let price = SatsPerMenger::from_usd(90_000.0, 4_319.0).unwrap();
-        let shortfall = price.sats_for(2 * MICRO_PER_MENGER) - pos.backing_sats;
+        let target = price.sats_for(2 * MICRO_PER_MENGER);
+        let shortfall = target - pos.backing_sats;
         let provider = decide(&snap(Role::Provider, &pos, price, T0), &Params::default());
-        assert_eq!(provider.action, Action::Pay { sats: shortfall });
+        assert_eq!(provider.action, Action::Pay { sats: shortfall - target / 2_000 });
         let saver = decide(&snap(Role::Saver, &pos, price, T0), &Params::default());
         assert_eq!(saver.action, Action::Await { owed_sats: shortfall, since: T0 });
     }
@@ -296,6 +390,23 @@ mod tests {
         let price = SatsPerMenger::from_usd(100_000.0, 4_319.0 * 1.05).unwrap();
         let d = decide(&snap(Role::Provider, &pos, price, T0), &Params::default());
         assert!(matches!(d.action, Action::Pay { .. }));
+    }
+
+    #[test]
+    fn prices_a_little_apart_do_not_ping_pong() {
+        // The provider's price is 0.12 % above the saver's: more than the tolerance, so it pays.
+        let pos = position(2);
+        let saver_price = P0;
+        let provider_price = SatsPerMenger(P0.0 * 10_012 / 10_000);
+        let mut pos_after = pos.clone();
+        match decide(&snap(Role::Provider, &pos, provider_price, T0), &Params::default()).action {
+            Action::Pay { sats } => apply_payment(&mut pos_after, sats, true),
+            other => panic!("provider should pay, got {other:?}"),
+        }
+        // At its own price the saver now holds a little too much, but not enough to pay it back.
+        let saver = decide(&snap(Role::Saver, &pos_after, saver_price, T0), &Params::default());
+        assert_eq!(saver.action, Action::Hold);
+        assert!(saver.drift_sats > 0);
     }
 
     #[test]
@@ -383,6 +494,61 @@ mod tests {
     }
 
     #[test]
+    fn adjustments_open_grow_shrink_and_end() {
+        let open = adjust(None, T0, 2 * MICRO_PER_MENGER as i64, 984_510, 20_000).unwrap();
+        assert_eq!(open, Position { micro_at_start: 2 * MICRO_PER_MENGER, started_at: T0, rate_ppm_per_year: 20_000, backing_sats: 984_510 });
+        // Half a year later, after the 1 % accrued, the saver spends half a Menger.
+        let t = T0 + YEAR_SECS / 2;
+        let smaller = adjust(Some(&open), t, -(MICRO_PER_MENGER as i64) / 2, -246_128, 20_000).unwrap();
+        assert_eq!(smaller.micro_at_start, 1_980_000 - 500_000);
+        assert_eq!(smaller.backing_sats, 984_510 - 246_128);
+        assert_eq!(smaller.started_at, t);
+        assert_eq!(smaller.rate_ppm_per_year, 20_000, "the rate of an open position never changes");
+        // Bringing it to zero ends it.
+        assert_eq!(adjust(Some(&smaller), t, -1_480_000, -738_382, 0), None);
+    }
+
+    fn request(delta_micro: i64, delta_backing: i64) -> AdjustRequest {
+        AdjustRequest { at: T0, delta_micro, delta_backing, rate_ppm_per_year: 0, their_price: P0 }
+    }
+
+    #[test]
+    fn provider_accepts_fair_adjustments() {
+        let r = AdjustRules::default();
+        let worth = P0.micro_for(500_000) as i64;
+        assert_eq!(check_adjust(None, &request(worth, 500_000), P0, T0, &r), Ok(()));
+        let pos = position(2);
+        assert_eq!(check_adjust(Some(&pos), &request(-worth, -500_000), P0, T0, &r), Ok(()));
+        // Within half a percent either way: two honest price readings.
+        assert_eq!(check_adjust(None, &request(worth * 1004 / 1000, 500_000), P0, T0, &r), Ok(()));
+        assert_eq!(check_adjust(Some(&pos), &request(-worth * 996 / 1000, -500_000), P0, T0, &r), Ok(()));
+    }
+
+    #[test]
+    fn provider_refuses_unfair_adjustments() {
+        let r = AdjustRules::default();
+        let worth = P0.micro_for(500_000) as i64;
+        let pos = position(2);
+        // More Mengers than the sats are worth, or too few given back.
+        assert!(check_adjust(None, &request(worth * 101 / 100, 500_000), P0, T0, &r).is_err());
+        assert!(check_adjust(Some(&pos), &request(-worth * 99 / 100, -500_000), P0, T0, &r).is_err());
+        // Growing on one side while shrinking on the other.
+        assert!(check_adjust(Some(&pos), &request(worth, -500_000), P0, T0, &r).is_err());
+        // More sats than the position holds.
+        let all = pos.backing_sats as i64 + 1;
+        assert!(check_adjust(Some(&pos), &request(-(P0.micro_for(all as u64) as i64), -all), P0, T0, &r).is_err());
+        // A price far from ours, a stale request, a rate change.
+        let mut far = request(worth, 500_000);
+        far.their_price = SatsPerMenger(P0.0 * 103 / 100);
+        assert!(check_adjust(None, &far, P0, T0, &r).is_err());
+        assert!(check_adjust(None, &request(worth, 500_000), P0, T0 + 3_600, &r).is_err());
+        let mut rate = request(worth, 500_000);
+        rate.rate_ppm_per_year = 10_000;
+        assert!(check_adjust(Some(&pos), &rate, P0, T0, &r).is_err());
+        assert!(check_adjust(None, &request(worth, 500_000), P0, T0, &AdjustRules { min_rate_ppm_per_year: 1, ..r }).is_err());
+    }
+
+    #[test]
     fn payments_move_the_backing() {
         let mut pos = position(1);
         let b = pos.backing_sats;
@@ -394,7 +560,8 @@ mod tests {
 
     proptest! {
         // Whatever the prices, at most one of the two parties pays, and paying the amount it
-        // decides brings the position back within tolerance (when it has the bitcoin to do so).
+        // decides brings the position back within half the tolerance (when it has the bitcoin to
+        // do so).
         #[test]
         fn one_payer_and_back_to_par(
             mengers in 1u64..1_000,
@@ -425,11 +592,11 @@ mod tests {
                 apply_payment(&mut pos, sats, true);
             }
             let after = decide(&snap(Role::Saver, &pos, price, now), &p);
+            let tolerance = ppm(after.target_sats, p.threshold_ppm).max(p.min_payment_sats);
+            prop_assert!(after.drift_sats.unsigned_abs() < tolerance);
             if saver_pays || provider_pays {
-                prop_assert_eq!(after.drift_sats, 0);
-            } else {
-                let tolerance = ppm(after.target_sats, p.threshold_ppm).max(p.min_payment_sats);
-                prop_assert!(after.drift_sats.unsigned_abs() < tolerance);
+                // Down to half the tolerance (a satoshi either way for rounding).
+                prop_assert!(after.drift_sats.unsigned_abs() <= tolerance / 2 + 1);
             }
         }
     }

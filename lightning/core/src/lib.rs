@@ -11,5 +11,8 @@ pub mod stability;
 pub mod unit;
 
 pub use price::{menger_price, Asset, GoldMemory, PricePoint, PriceRules, Quote};
-pub use stability::{decide, Action, CloseReason, Decision, Params, Position, Role, Snapshot, Warning};
+pub use stability::{
+    adjust, check_adjust, decide, Action, AdjustRequest, AdjustRules, CloseReason, Decision, Params, Position, Role,
+    Snapshot, Warning,
+};
 pub use unit::{SatsPerMenger, MICRO_PER_MENGER};

@@ -59,6 +59,20 @@ pub fn grams(micro: u64) -> f64 {
     micro as f64 / MICRO_PER_MENGER as f64 * GRAMS_PER_MENGER
 }
 
+/// Reads an amount of Mengers typed by a person, such as `2`, `0.5` or `0,25`, into
+/// micro-Mengers. At most six decimals; anything else is `None`.
+pub fn parse_mengers(text: &str) -> Option<u64> {
+    let text = text.trim().replace(',', ".");
+    let (whole, frac) = text.split_once('.').unwrap_or((&text, ""));
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    if (whole.is_empty() && frac.is_empty()) || !digits(whole) || !digits(frac) || frac.len() > 6 {
+        return None;
+    }
+    let whole: u64 = if whole.is_empty() { 0 } else { whole.parse().ok()? };
+    let frac: u64 = format!("{frac:0<6}").parse().ok()?;
+    whole.checked_mul(MICRO_PER_MENGER)?.checked_add(frac)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,6 +95,19 @@ mod tests {
         assert_eq!(SatsPerMenger::from_usd(100_000.0, f64::INFINITY), None);
         // A Menger worth less than one satoshi cannot be represented.
         assert_eq!(SatsPerMenger::from_usd(1e15, 1.0), None);
+    }
+
+    #[test]
+    fn reading_typed_amounts() {
+        assert_eq!(parse_mengers("2"), Some(2_000_000));
+        assert_eq!(parse_mengers("0.5"), Some(500_000));
+        assert_eq!(parse_mengers(" 0,25 "), Some(250_000));
+        assert_eq!(parse_mengers(".000001"), Some(1));
+        assert_eq!(parse_mengers("1.5000001"), None);
+        assert_eq!(parse_mengers("-1"), None);
+        assert_eq!(parse_mengers("1e3"), None);
+        assert_eq!(parse_mengers("."), None);
+        assert_eq!(parse_mengers(""), None);
     }
 
     #[test]
