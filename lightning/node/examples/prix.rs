@@ -8,7 +8,7 @@ fn main() {
     let now = chrono::Utc::now().timestamp();
     let (quotes, errors) = prices::read_all(&prices::live_sources(), now);
     for q in &quotes {
-        println!("{:<11} {:?}  {:>12.2} $  (il y a {} s)", q.source, q.asset, q.usd, now - q.at);
+        println!("{:<16} {:?}  {:>12.2} $  (il y a {} s)", q.source, q.asset, q.usd, now - q.at);
     }
     for e in &errors {
         println!("indisponible : {e}");

@@ -58,6 +58,8 @@ enum Command {
     },
     /// Fait tourner un épargnant ou un fournisseur. Tape « aide » pendant qu'il tourne.
     Run(Box<RunArgs>),
+    /// Affiche la liste des sources de prix habituelles, à enregistrer dans un fichier et à modifier.
+    Sources,
 }
 
 #[derive(clap::Args)]
@@ -83,7 +85,8 @@ struct RunArgs {
     rpc_user: String,
     #[arg(long, default_value = "")]
     rpc_password: String,
-    /// `live` pour les prix publics, ou `fichier:CHEMIN` pour un fichier {"btc_usd":…,"xau_usd":…}.
+    /// `live` pour les sources habituelles, `sources:CHEMIN` pour ta propre liste de sources (voir
+    /// la commande `sources`), ou `fichier:CHEMIN` pour des prix fixes {"btc_usd":…,"xau_usd":…}.
     #[arg(long, default_value = "live")]
     prices: String,
     /// Sources qui doivent concorder pour chaque prix.
@@ -171,6 +174,10 @@ fn main() -> Result<()> {
         Command::Demo { bitcoind } => demo(&bitcoind),
         Command::Essai { bitcoind } => essai(&bitcoind),
         Command::Run(args) => run(*args),
+        Command::Sources => {
+            println!("{}", serde_json::to_string_pretty(&prices::default_specs())?);
+            Ok(())
+        }
     }
 }
 
@@ -378,12 +385,11 @@ fn run(a: RunArgs) -> Result<()> {
         }
         (None, None) => bail!("indique --esplora ou --bitcoind-rpc"),
     };
-    let sources: Vec<Box<dyn Source>> = match a.prices.as_str() {
-        "live" => prices::live_sources(),
-        other => match other.strip_prefix("fichier:") {
-            Some(path) => vec![Box::new(prices::File { path: PathBuf::from(path) })],
-            None => bail!("--prices attend `live` ou `fichier:CHEMIN`"),
-        },
+    let sources: Vec<Box<dyn Source>> = match a.prices.split_once(':') {
+        None if a.prices == "live" => prices::live_sources(),
+        Some(("sources", path)) => prices::sources_from_file(Path::new(path))?,
+        Some(("fichier", path)) => vec![Box::new(prices::File { path: PathBuf::from(path) })],
+        _ => bail!("--prices attend `live`, `sources:CHEMIN` ou `fichier:CHEMIN`"),
     };
     let provider = a.fournisseur.as_deref().map(parse_peer).transpose()?;
     let listen = a.listen.clone().or_else(|| (role == Role::Provider).then(|| "0.0.0.0:9735".to_string()));

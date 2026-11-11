@@ -1,7 +1,10 @@
 //! Prices. Each party chooses its own sources: there is no common oracle.
 //!
 //! A price is accepted only when enough independent, recent sources agree with each other. The
-//! median of the agreeing sources is used. Gold does not trade from Friday 21:00 to Monday 00:00
+//! median of the agreeing sources is used. Sources that read the same thing in several places (the
+//! same gold token on three markets) form one family and count once: if that token loses its link
+//! to gold, its three prices do not outvote the others. Gold does not trade from Friday 21:00 to
+//! Monday 00:00
 //! (UTC), which covers New York's summer and winter time with an hour of margin at the reopening.
 //! During that window the last gold price of the week is kept, while bitcoin keeps moving. When no
 //! acceptable price exists, nobody pays and nobody closes for non-payment: stale data never moves
@@ -23,6 +26,8 @@ pub enum Asset {
 /// One price read from one source.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Quote {
+    /// Name of the source. A name such as `paxg:kraken` puts it in the family `paxg`, with every
+    /// other source whose name starts the same way; a name without a colon is a family of one.
     pub source: String,
     pub asset: Asset,
     pub usd: f64,
@@ -32,7 +37,7 @@ pub struct Quote {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PriceRules {
-    /// Independent sources that must agree, per asset.
+    /// Independent sources (families) that must agree, per asset.
     pub min_sources: usize,
     /// Oldest bitcoin quote accepted, in seconds.
     pub btc_max_age: i64,
@@ -76,15 +81,29 @@ impl fmt::Display for PriceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PriceError::NotEnoughSources { asset, fresh, required } => {
-                write!(f, "{asset:?}: {fresh} recent source(s), {required} required")
+                write!(f, "{} : {fresh} source(s) récente(s), il en faut {required}", asset.name_fr())
             }
             PriceError::Disagreement { asset, agreeing, required } => {
-                write!(f, "{asset:?}: only {agreeing} source(s) agree, {required} required")
+                write!(f, "{} : {agreeing} source(s) concordante(s), il en faut {required}", asset.name_fr())
             }
-            PriceError::NoGoldPrice => write!(f, "gold market closed and no recent gold price known"),
-            PriceError::Invalid => write!(f, "prices give no valid Menger price"),
+            PriceError::NoGoldPrice => write!(f, "marché de l'or fermé, et pas de prix récent d'avant la fermeture"),
+            PriceError::Invalid => write!(f, "ces prix ne donnent pas de prix valable pour le Menger"),
         }
     }
+}
+
+impl Asset {
+    fn name_fr(self) -> &'static str {
+        match self {
+            Asset::Btc => "bitcoin",
+            Asset::Gold => "or",
+        }
+    }
+}
+
+/// The family of a source: what comes before the colon in its name, or the whole name.
+pub fn family(source: &str) -> &str {
+    source.split_once(':').map_or(source, |(family, _)| family)
 }
 
 /// True from Friday 21:00 to Monday 00:00, UTC.
@@ -100,7 +119,8 @@ pub fn gold_market_closed(now: i64) -> bool {
     }
 }
 
-/// Median of the recent quotes for `asset`, provided at least `min_sources` of them agree.
+/// Median of the recent quotes for `asset`, provided at least `min_sources` independent sources
+/// agree. The sources of one family count as one source, worth the median of the family.
 pub fn aggregate(quotes: &[Quote], asset: Asset, now: i64, rules: &PriceRules) -> Result<f64, PriceError> {
     let (max_age, max_spread) = match asset {
         Asset::Btc => (rules.btc_max_age, rules.btc_max_spread_ppm),
@@ -110,7 +130,7 @@ pub fn aggregate(quotes: &[Quote], asset: Asset, now: i64, rules: &PriceRules) -
     // One quote per source: the most recent.
     let mut best: Vec<&Quote> = Vec::new();
     for q in quotes.iter().filter(|q| q.asset == asset) {
-        let fresh = now - q.at <= max_age && q.at <= now + 60;
+        let fresh = now.saturating_sub(q.at) <= max_age && q.at <= now.saturating_add(60);
         if !(fresh && q.usd.is_finite() && q.usd > 0.0) {
             continue;
         }
@@ -120,10 +140,18 @@ pub fn aggregate(quotes: &[Quote], asset: Asset, now: i64, rules: &PriceRules) -
             None => best.push(q),
         }
     }
-    if best.len() < required {
-        return Err(PriceError::NotEnoughSources { asset, fresh: best.len(), required });
+    // One value per family: the median of its sources.
+    let mut families: Vec<(&str, Vec<f64>)> = Vec::new();
+    for q in &best {
+        match families.iter_mut().find(|(name, _)| *name == family(&q.source)) {
+            Some((_, values)) => values.push(q.usd),
+            None => families.push((family(&q.source), vec![q.usd])),
+        }
     }
-    let values: Vec<f64> = best.iter().map(|q| q.usd).collect();
+    if families.len() < required {
+        return Err(PriceError::NotEnoughSources { asset, fresh: families.len(), required });
+    }
+    let values: Vec<f64> = families.iter().map(|(_, values)| median(values)).collect();
     let m = median(&values);
     let agreeing: Vec<f64> = values
         .into_iter()
@@ -243,6 +271,40 @@ mod tests {
         // The same source twice does not count as two sources.
         let twice = vec![q("a", Asset::Btc, 1.0, WED_NOON - 5), q("a", Asset::Btc, 2.0, WED_NOON)];
         assert!(matches!(aggregate(&twice, Asset::Btc, WED_NOON, &r), Err(PriceError::NotEnoughSources { .. })));
+    }
+
+    #[test]
+    fn one_family_counts_once() {
+        let r = PriceRules::default();
+        // The same gold token on three markets is one source, however many markets quote it.
+        let alone = vec![
+            q("paxg:kraken", Asset::Gold, 4_000.0, WED_NOON),
+            q("paxg:coinbase", Asset::Gold, 4_001.0, WED_NOON),
+            q("paxg:bitstamp", Asset::Gold, 4_002.0, WED_NOON),
+        ];
+        assert_eq!(
+            aggregate(&alone, Asset::Gold, WED_NOON, &r),
+            Err(PriceError::NotEnoughSources { asset: Asset::Gold, fresh: 1, required: 2 })
+        );
+        // The token loses its link to gold: its three prices do not outvote the two other sources.
+        let mut quotes = vec![
+            q("paxg:kraken", Asset::Gold, 3_000.0, WED_NOON),
+            q("paxg:coinbase", Asset::Gold, 3_010.0, WED_NOON),
+            q("paxg:bitstamp", Asset::Gold, 2_990.0, WED_NOON),
+            q("spot:swissquote", Asset::Gold, 4_005.0, WED_NOON),
+            q("xaut:kraken", Asset::Gold, 3_995.0, WED_NOON),
+        ];
+        assert_eq!(aggregate(&quotes, Asset::Gold, WED_NOON, &r), Ok(4_000.0));
+        // All three families healthy: the median of the three, the token's own median counting once.
+        for quote in quotes.iter_mut().take(3) {
+            quote.usd += 1_000.0;
+        }
+        assert_eq!(aggregate(&quotes, Asset::Gold, WED_NOON, &r), Ok(4_000.0));
+        // With the spot source down, the two tokens still agree with each other.
+        quotes.remove(3);
+        assert_eq!(aggregate(&quotes, Asset::Gold, WED_NOON, &r), Ok(3_997.5));
+        assert_eq!(family("paxg:kraken"), "paxg");
+        assert_eq!(family("kraken"), "kraken");
     }
 
     #[test]

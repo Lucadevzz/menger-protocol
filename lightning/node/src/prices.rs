@@ -4,6 +4,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use menger_core::{Asset, Quote};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -39,54 +40,131 @@ pub fn read_all(sources: &[Box<dyn Source>], now: i64) -> (Vec<Quote>, Vec<Strin
     (quotes, errors)
 }
 
-/// The usual set: three bitcoin markets, and two gold references that must agree within 1 %: the
-/// spot price from Swissquote and the PAXG token on Kraken (one PAXG is one troy ounce). Only the
-/// price of PAXG is read; nothing is held. Gold quotes are ignored on weekends, when the last
-/// Friday price is kept, so the token's weekend trading never counts.
-pub fn live_sources() -> Vec<Box<dyn Source>> {
+/// What a source quotes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AssetName {
+    Btc,
+    Or,
+}
+
+/// How a source answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Format {
+    /// Kraken's `Ticker`: the middle of the best bid and ask.
+    Kraken,
+    /// Bitstamp's `ticker`: the middle of bid and ask.
+    Bitstamp,
+    /// Coinbase's `prices/…/spot`.
+    Coinbase,
+    /// Swissquote's public quotes.
+    Swissquote,
+    /// Any JSON answer: the price is the number found at `champ`.
+    Json,
+}
+
+/// One source, as written in a sources file. Each party keeps its own list: nobody has to trust a
+/// common oracle, and nobody has to trust this program's choice either.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceSpec {
+    /// Its name. `family:place` (such as `paxg:kraken`) puts it in a family that counts once.
+    pub nom: String,
+    pub actif: AssetName,
+    pub url: String,
+    pub format: Format,
+    /// For the `json` format: where the price is, as a JSON pointer such as `/data/price`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub champ: Option<String>,
+}
+
+fn spec(nom: &str, actif: AssetName, format: Format, url: &str) -> SourceSpec {
+    SourceSpec { nom: nom.into(), actif, url: url.into(), format, champ: None }
+}
+
+/// The usual set. Bitcoin: three markets. Gold: three families that must agree within 1 %, the
+/// spot price (Swissquote) and two tokens each worth one troy ounce, PAXG (on three markets, which
+/// count once) and XAUT. Only prices are read; nothing is held. Gold quotes are ignored on
+/// week-ends, when the last Friday price is kept, so the tokens' week-end trading never counts.
+pub fn default_specs() -> Vec<SourceSpec> {
+    use AssetName::{Btc, Or};
     vec![
-        Box::new(Http::new("kraken", Asset::Btc, "https://api.kraken.com/0/public/Ticker?pair=XBTUSD", parse_kraken)),
-        Box::new(Http::new("bitstamp", Asset::Btc, "https://www.bitstamp.net/api/v2/ticker/btcusd/", parse_bitstamp)),
-        Box::new(Http::new("coinbase", Asset::Btc, "https://api.coinbase.com/v2/prices/BTC-USD/spot", parse_coinbase)),
-        Box::new(Http::new(
-            "swissquote",
-            Asset::Gold,
+        spec("kraken", Btc, Format::Kraken, "https://api.kraken.com/0/public/Ticker?pair=XBTUSD"),
+        spec("bitstamp", Btc, Format::Bitstamp, "https://www.bitstamp.net/api/v2/ticker/btcusd/"),
+        spec("coinbase", Btc, Format::Coinbase, "https://api.coinbase.com/v2/prices/BTC-USD/spot"),
+        spec(
+            "spot:swissquote",
+            Or,
+            Format::Swissquote,
             "https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/XAU/USD",
-            parse_swissquote,
-        )),
-        Box::new(Http::new("kraken-paxg", Asset::Gold, "https://api.kraken.com/0/public/Ticker?pair=PAXGUSD", parse_kraken)),
+        ),
+        spec("paxg:kraken", Or, Format::Kraken, "https://api.kraken.com/0/public/Ticker?pair=PAXGUSD"),
+        spec("paxg:coinbase", Or, Format::Coinbase, "https://api.coinbase.com/v2/prices/PAXG-USD/spot"),
+        spec("paxg:bitstamp", Or, Format::Bitstamp, "https://www.bitstamp.net/api/v2/ticker/paxgusd/"),
+        spec("xaut:kraken", Or, Format::Kraken, "https://api.kraken.com/0/public/Ticker?pair=XAUTUSD"),
     ]
 }
 
-type Parser = fn(&Value, i64) -> Result<(f64, i64)>;
+pub fn live_sources() -> Vec<Box<dyn Source>> {
+    default_specs().into_iter().map(|s| Box::new(Http { spec: s }) as Box<dyn Source>).collect()
+}
+
+/// The sources listed in a file: a JSON array of [`SourceSpec`].
+pub fn sources_from_file(path: &std::path::Path) -> Result<Vec<Box<dyn Source>>> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("lecture de {}", path.display()))?;
+    let specs: Vec<SourceSpec> = serde_json::from_str(&text).with_context(|| format!("{} n'est pas une liste de sources", path.display()))?;
+    if specs.is_empty() {
+        return Err(anyhow!("{} ne contient aucune source", path.display()));
+    }
+    specs.into_iter().map(|s| Ok(Box::new(Http::new(s)?) as Box<dyn Source>)).collect()
+}
 
 pub struct Http {
-    name: String,
-    asset: Asset,
-    url: String,
-    parse: Parser,
+    spec: SourceSpec,
 }
 
 impl Http {
-    pub fn new(name: &str, asset: Asset, url: &str, parse: Parser) -> Self {
-        Http { name: name.into(), asset, url: url.into(), parse }
+    /// Checks the source before it is used: a price never travels in clear, except from this
+    /// computer.
+    pub fn new(spec: SourceSpec) -> Result<Self> {
+        let local = ["http://127.0.0.1", "http://localhost", "http://[::1]"].iter().any(|p| spec.url.starts_with(p));
+        if !(spec.url.starts_with("https://") || local) {
+            return Err(anyhow!("source {} : l'adresse doit commencer par https://", spec.nom));
+        }
+        if spec.nom.trim().is_empty() {
+            return Err(anyhow!("une source n'a pas de nom"));
+        }
+        if spec.format == Format::Json && spec.champ.is_none() {
+            return Err(anyhow!("source {} : le format json demande un champ, par exemple /data/price", spec.nom));
+        }
+        Ok(Http { spec })
     }
 }
 
 impl Source for Http {
     fn name(&self) -> &str {
-        &self.name
+        &self.spec.nom
     }
 
     fn fetch(&self, now: i64) -> Result<Vec<Quote>> {
         let body: Value = agent()
-            .get(&self.url)
+            .get(&self.spec.url)
             .call()
-            .with_context(|| format!("request to {}", self.url))?
+            .with_context(|| format!("request to {}", self.spec.url))?
             .into_json()
             .context("answer is not JSON")?;
-        let (usd, at) = (self.parse)(&body, now)?;
-        Ok(vec![Quote { source: self.name.clone(), asset: self.asset, usd, at }])
+        let (usd, at) = match self.spec.format {
+            Format::Kraken => parse_kraken(&body, now)?,
+            Format::Bitstamp => parse_bitstamp(&body, now)?,
+            Format::Coinbase => parse_coinbase(&body, now, &self.spec.url)?,
+            Format::Swissquote => parse_swissquote(&body, now)?,
+            Format::Json => parse_pointer(&body, now, self.spec.champ.as_deref().unwrap_or_default())?,
+        };
+        let asset = match self.spec.actif {
+            AssetName::Btc => Asset::Btc,
+            AssetName::Or => Asset::Gold,
+        };
+        Ok(vec![Quote { source: self.spec.nom.clone(), asset, usd, at }])
     }
 }
 
@@ -129,35 +207,52 @@ fn positive(usd: Option<f64>, what: &str) -> Result<f64> {
     }
 }
 
-/// `{"error":[],"result":{"XXBTZUSD":{"c":["67000.1","0.01"], ...}}}`: last trade price.
+/// The middle of a bid and an ask no more than 1 % apart. The last trade of a quiet market can be
+/// hours old; a tight bid and ask are a price someone stands behind right now.
+fn middle(bid: Option<f64>, ask: Option<f64>) -> Result<f64> {
+    let (bid, ask) = (positive(bid, "bid")?, positive(ask, "ask")?);
+    if ask < bid || (ask - bid) / bid > 0.01 {
+        return Err(anyhow!("bid {bid} and ask {ask} are too far apart"));
+    }
+    Ok((bid + ask) / 2.0)
+}
+
+/// `{"error":[],"result":{"XXBTZUSD":{"a":["67001","1","1.0"],"b":["67000","1","1.0"], ...}}}`.
 pub fn parse_kraken(v: &Value, now: i64) -> Result<(f64, i64)> {
     if let Some(errs) = v.get("error").and_then(Value::as_array) {
         if !errs.is_empty() {
             return Err(anyhow!("kraken error: {errs:?}"));
         }
     }
-    let pair = v.get("result").and_then(Value::as_object).and_then(|m| m.values().next());
-    let usd = pair.and_then(|p| p.get("c")).and_then(|c| c.get(0)).and_then(number);
-    Ok((positive(usd, "price")?, now))
+    let pair = v.get("result").and_then(Value::as_object).filter(|m| m.len() == 1).and_then(|m| m.values().next());
+    let side = |key: &str| pair.and_then(|p| p.get(key)).and_then(|x| x.get(0)).and_then(number);
+    Ok((middle(side("b"), side("a"))?, now))
 }
 
-/// `{"last":"67000","timestamp":"1730000000", ...}`.
+/// `{"bid":"66999","ask":"67001","last":"67000","timestamp":"1730000000", ...}`.
 pub fn parse_bitstamp(v: &Value, now: i64) -> Result<(f64, i64)> {
-    let usd = v.get("last").and_then(number);
     let at = v.get("timestamp").and_then(number).map(|t| t as i64).unwrap_or(now);
-    Ok((positive(usd, "price")?, at))
+    let field = |key: &str| v.get(key).and_then(number);
+    Ok((middle(field("bid"), field("ask"))?, at))
 }
 
-/// `{"data":{"amount":"67000.12","base":"BTC","currency":"USD"}}`.
-pub fn parse_coinbase(v: &Value, now: i64) -> Result<(f64, i64)> {
+/// `{"data":{"amount":"67000.12","base":"BTC","currency":"USD"}}`. The pair named in the answer
+/// must be the one asked for in the address.
+pub fn parse_coinbase(v: &Value, now: i64, url: &str) -> Result<(f64, i64)> {
     let data = v.get("data");
-    let pair_ok = data.and_then(|d| d.get("base")).and_then(Value::as_str) == Some("BTC")
-        && data.and_then(|d| d.get("currency")).and_then(Value::as_str) == Some("USD");
-    if !pair_ok {
-        return Err(anyhow!("coinbase answer is not BTC-USD"));
+    let text = |key: &str| data.and_then(|d| d.get(key)).and_then(Value::as_str).unwrap_or_default();
+    let (base, currency) = (text("base"), text("currency"));
+    if currency != "USD" || base.is_empty() || !url.contains(&format!("/{base}-{currency}/")) {
+        return Err(anyhow!("coinbase answer is for {base}-{currency}, not for the pair asked"));
     }
     let usd = data.and_then(|d| d.get("amount")).and_then(number);
     Ok((positive(usd, "price")?, now))
+}
+
+/// The number found at `pointer` (RFC 6901, such as `/data/price`) in any JSON answer.
+pub fn parse_pointer(v: &Value, now: i64, pointer: &str) -> Result<(f64, i64)> {
+    let usd = v.pointer(pointer).and_then(number);
+    Ok((positive(usd, "price").with_context(|| format!("at {pointer}"))?, now))
 }
 
 /// A list of platforms, each with `spreadProfilePrices` (bid/ask) and `ts` in milliseconds.
@@ -194,22 +289,74 @@ mod tests {
 
     #[test]
     fn kraken() {
-        let v = json!({"error": [], "result": {"XXBTZUSD": {"a": ["101.0","1","1.0"], "c": ["100250.5", "0.01"]}}});
+        let v = json!({"error": [], "result": {"XXBTZUSD": {"a": ["100251.0","1","1.0"], "b": ["100250.0","1","1.0"], "c": ["99000.0", "0.01"]}}});
+        // The middle of bid and ask, not the last trade.
         assert_eq!(parse_kraken(&v, NOW).unwrap(), (100_250.5, NOW));
         assert!(parse_kraken(&json!({"error": ["EQuery:Unknown asset pair"], "result": {}}), NOW).is_err());
+        // A market nobody quotes tightly gives no price.
+        let wide = json!({"error": [], "result": {"XAUTUSD": {"a": ["4100.0","1","1.0"], "b": ["3900.0","1","1.0"]}}});
+        assert!(parse_kraken(&wide, NOW).is_err());
+        let crossed = json!({"error": [], "result": {"XAUTUSD": {"a": ["3900.0","1","1.0"], "b": ["4000.0","1","1.0"]}}});
+        assert!(parse_kraken(&crossed, NOW).is_err());
     }
 
     #[test]
     fn bitstamp() {
-        let v = json!({"last": "100100", "timestamp": "1793793590", "bid": "100099"});
+        let v = json!({"last": "99000", "timestamp": "1793793590", "bid": "100099", "ask": "100101"});
         assert_eq!(parse_bitstamp(&v, NOW).unwrap(), (100_100.0, 1_793_793_590));
+        // An unknown pair answers with the list of all pairs: not a price.
+        assert!(parse_bitstamp(&json!([{"last": "1", "bid": "1", "ask": "1"}]), NOW).is_err());
     }
 
     #[test]
     fn coinbase() {
+        let btc = "https://api.coinbase.com/v2/prices/BTC-USD/spot";
         let v = json!({"data": {"amount": "99990.12", "base": "BTC", "currency": "USD"}});
-        assert_eq!(parse_coinbase(&v, NOW).unwrap(), (99_990.12, NOW));
-        assert!(parse_coinbase(&json!({"data": {"amount": "1", "base": "ETH", "currency": "USD"}}), NOW).is_err());
+        assert_eq!(parse_coinbase(&v, NOW, btc).unwrap(), (99_990.12, NOW));
+        let gold = json!({"data": {"amount": "3997.2", "base": "PAXG", "currency": "USD"}});
+        assert_eq!(parse_coinbase(&gold, NOW, "https://api.coinbase.com/v2/prices/PAXG-USD/spot").unwrap(), (3_997.2, NOW));
+        // An answer for another pair than the one asked.
+        assert!(parse_coinbase(&gold, NOW, btc).is_err());
+        assert!(parse_coinbase(&json!({"data": {"amount": "1", "base": "BTC", "currency": "EUR"}}), NOW, btc).is_err());
+    }
+
+    #[test]
+    fn any_json_answer() {
+        let v = json!({"data": {"price": "4005.1", "list": [1, 2.5]}});
+        assert_eq!(parse_pointer(&v, NOW, "/data/price").unwrap(), (4_005.1, NOW));
+        assert_eq!(parse_pointer(&v, NOW, "/data/list/1").unwrap(), (2.5, NOW));
+        assert!(parse_pointer(&v, NOW, "/data/absent").is_err());
+        assert!(parse_pointer(&json!({"p": -1}), NOW, "/p").is_err());
+    }
+
+    #[test]
+    fn a_file_of_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sources.json");
+        // The usual set, written out and read back: a starting point to edit.
+        std::fs::write(&path, serde_json::to_string_pretty(&default_specs()).unwrap()).unwrap();
+        let sources = sources_from_file(&path).unwrap();
+        assert_eq!(sources.len(), default_specs().len());
+        assert!(sources.iter().any(|s| s.name() == "xaut:kraken"));
+        // Three families for gold, three markets for bitcoin.
+        let specs = default_specs();
+        let families: std::collections::BTreeSet<&str> =
+            specs.iter().filter(|s| s.actif == AssetName::Or).map(|s| menger_core::price::family(&s.nom)).collect();
+        assert_eq!(families.len(), 3);
+        assert!(specs.iter().filter(|s| s.actif == AssetName::Btc).count() >= 3);
+        // One's own source, in any JSON shape.
+        std::fs::write(&path, r#"[{"nom":"maison","actif":"or","url":"https://example.org/or.json","format":"json","champ":"/prix"}]"#).unwrap();
+        assert_eq!(sources_from_file(&path).unwrap()[0].name(), "maison");
+        // Never in clear over the network, never without saying where the price is.
+        for bad in [
+            r#"[{"nom":"a","actif":"or","url":"http://example.org/or.json","format":"json","champ":"/prix"}]"#,
+            r#"[{"nom":"a","actif":"or","url":"https://example.org/or.json","format":"json"}]"#,
+            r#"[{"nom":"a","actif":"argent","url":"https://example.org/","format":"kraken"}]"#,
+            "[]",
+        ] {
+            std::fs::write(&path, bad).unwrap();
+            assert!(sources_from_file(&path).is_err(), "{bad}");
+        }
     }
 
     #[test]
