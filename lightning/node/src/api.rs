@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail, Result};
 use ldk_node::bitcoin::Network;
 use ldk_node::lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescriptionRef};
 use menger_core::price::Quote;
-use menger_core::stability::Role;
+use menger_core::stability::{Action, Role, Warning};
 use menger_core::unit::{grams, parse_mengers};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -61,6 +61,45 @@ fn route(party: &mut Party, call: &ApiCall, ctx: &ApiContext) -> Result<Value> {
             }
             party.stabilize(sats, &(ctx.quotes)(), ctx.now)?;
             Ok(json!({ "sats": sats }))
+        }
+        ("POST", "/api/reprendre") => {
+            #[derive(Deserialize)]
+            struct Body {
+                sats: Option<u64>,
+                #[serde(default)]
+                tout: bool,
+            }
+            let b: Body = body(call)?;
+            let sats = if b.tout { None } else { Some(b.sats.ok_or_else(|| anyhow!("montant manquant"))?) };
+            party.release(sats, &(ctx.quotes)(), ctx.now)?;
+            Ok(json!({ "ok": true }))
+        }
+        ("POST", "/api/annuler") => {
+            party.cancel_spend(ctx.now)?;
+            Ok(json!({ "ok": true }))
+        }
+        ("POST", "/api/partir") => {
+            #[derive(Deserialize)]
+            struct Body {
+                #[serde(default)]
+                forcer: bool,
+            }
+            let b: Body = body(call)?;
+            party.leave(b.forcer, ctx.now)?;
+            Ok(json!({ "ok": true }))
+        }
+        ("POST", "/api/retirer") => {
+            #[derive(Deserialize)]
+            struct Body {
+                adresse: String,
+                sats: Option<u64>,
+                #[serde(default)]
+                tout: bool,
+            }
+            let b: Body = body(call)?;
+            let sats = if b.tout { None } else { Some(b.sats.ok_or_else(|| anyhow!("montant manquant"))?) };
+            let txid = party.withdraw(&b.adresse, sats, ctx.now)?;
+            Ok(json!({ "transaction": txid }))
         }
         ("POST", "/api/facture") => {
             #[derive(Deserialize)]
@@ -166,6 +205,7 @@ pub fn state(party: &Party, ctx: &ApiContext) -> Value {
         })),
         "prix_erreur": ctx.last.and_then(|r| r.price_error.clone()),
         "chaine_sats": party.onchain_spendable_sats(),
+        "retour_sats": party.returning_sats(),
         "journal": journal,
         "essai": ctx.sandbox.map(|s| json!({
             "btc_usd": s.btc_usd,
@@ -181,6 +221,17 @@ pub fn state(party: &Party, ctx: &ApiContext) -> Value {
                 .unwrap_or_default();
             let ready = channels.iter().filter(|c| c.is_usable).count();
             let position = party.position();
+            let peer = provider.and_then(|p| party.peer(&p));
+            // What the last look at the position said: who owes, and what the provider can cover.
+            let seen = provider.and_then(|p| ctx.last?.peers.iter().find(|r| r.peer == p.to_string()));
+            let owed = seen.and_then(|r| match r.decision.action {
+                Action::Await { owed_sats, since } => Some(json!({ "sats": owed_sats, "depuis": since })),
+                _ => None,
+            });
+            let low_coverage = seen.and_then(|r| match r.decision.warning {
+                Some(Warning::LowCoverage { coverage_ppm }) => Some(coverage_ppm),
+                _ => None,
+            });
             json!({
                 "solde_sats": party.balance(),
                 "libres_sats": party.free_sats(),
@@ -197,9 +248,16 @@ pub fn state(party: &Party, ctx: &ApiContext) -> Value {
                 "canaux": { "prets": ready, "en_attente": channels.len() - ready },
                 "fournisseur": provider.map(|p| p.to_string()),
                 "peut_ouvrir_canal": party.cfg.provider.is_some(),
-                "demande": party.pending().map(|p| json!({ "sats": p.delta_backing, "micro": p.delta_micro })),
+                "demande": party.pending().map(|p| json!({ "sats": p.delta_backing, "micro": p.expected_micro })),
                 "paiement": party.state.spend.as_ref().map(|s| json!({ "sats": s.sats, "pret": s.ready, "envoye": s.payment_id.is_some() })),
-                "ferme": provider.and_then(|p| party.peer(&p)).and_then(|p| p.closed.clone()),
+                "ferme": peer.and_then(|p| p.closed.clone()),
+                "fermeture_en_cours": peer.is_some_and(|p| p.closing_since.is_some()),
+                "sortie_forcee": peer.is_some_and(|p| p.force_closed),
+                "injoignable_depuis": peer.and_then(|p| p.unreachable_since).filter(|_| !channels.is_empty()),
+                "doit": owed,
+                "couverture_faible_ppm": low_coverage,
+                // Blocks to wait for our bitcoin if we have to leave by force.
+                "delai_blocs": channels.iter().filter_map(|c| c.force_close_spend_delay).max(),
             })
         }
         Role::Provider => {
@@ -211,6 +269,7 @@ pub fn state(party: &Party, ctx: &ApiContext) -> Value {
                     let position = peer.position.as_ref()?;
                     let id = ldk_node::bitcoin::secp256k1::PublicKey::from_str(key).ok()?;
                     let micro = position.micro_mengers(ctx.now);
+                    let seen = ctx.last.and_then(|r| r.peers.iter().find(|r| &r.peer == key));
                     Some(json!({
                         "noeud": key,
                         "micro": micro,
@@ -218,6 +277,9 @@ pub fn state(party: &Party, ctx: &ApiContext) -> Value {
                         "sats": position.backing_sats,
                         "notre_cote_sats": party.our_outbound(&id),
                         "ferme": peer.closed,
+                        "en_ligne": seen.map(|r| r.online),
+                        // Positive when the saver owes us, negative when we owe it.
+                        "ecart_sats": seen.map(|r| r.decision.drift_sats),
                     }))
                 })
                 .collect();

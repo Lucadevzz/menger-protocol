@@ -47,6 +47,26 @@ impl SatsPerMenger {
         let v = (sats as u128 * MICRO_PER_MENGER as u128 + self.0 as u128 / 2) / self.0 as u128;
         v.min(u64::MAX as u128) as u64
     }
+
+    /// Micro-Mengers worth `sats` satoshis at this price, rounded down: never more than they are
+    /// worth.
+    pub fn micro_for_floor(self, sats: u64) -> u64 {
+        if self.0 == 0 {
+            return 0;
+        }
+        let v = sats as u128 * MICRO_PER_MENGER as u128 / self.0 as u128;
+        v.min(u64::MAX as u128) as u64
+    }
+
+    /// Micro-Mengers worth `sats` satoshis at this price, rounded up: never fewer than they are
+    /// worth.
+    pub fn micro_for_ceil(self, sats: u64) -> u64 {
+        if self.0 == 0 {
+            return 0;
+        }
+        let v = (sats as u128 * MICRO_PER_MENGER as u128).div_ceil(self.0 as u128);
+        v.min(u64::MAX as u128) as u64
+    }
 }
 
 /// Formats micro-Mengers as Mengers with six decimals, e.g. `1.250000`.

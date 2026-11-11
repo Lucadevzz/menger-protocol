@@ -30,7 +30,7 @@ fn start(role: Role, dir: &Path, provider: Option<PublicKey>) -> Result<Party> {
         Role::Provider => ("fournisseur", PROVIDER_LISTEN),
     };
     let chain = ChainSource::Esplora { url: ESPLORA.into() };
-    let mut cfg = PartyConfig::new(role, dir.join(name), Network::Signet, listen.into(), chain);
+    let mut cfg = PartyConfig::new(role, dir.join(name), Network::Signet, Some(listen.into()), chain);
     // Seuils fins pour voir les paiements suivre les petits mouvements réels du prix.
     cfg.params = Params { threshold_ppm: 100, min_payment_sats: 10, cooldown_secs: 30, ..Params::default() };
     cfg.price_rules = PriceRules::default();

@@ -10,7 +10,7 @@
 //!
 //! The page also refuses to be shown inside another site's frame, so nobody can trick a click.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use std::io::Read;
 use std::net::SocketAddr;
 use std::sync::mpsc;
@@ -64,7 +64,7 @@ pub fn serve(addr: &str, forward: impl Fn(ApiCall) -> bool + Send + 'static) -> 
     }
     let server = Server::http(wanted).map_err(|e| anyhow!("interface sur {addr} : {e}"))?;
     let port = server.server_addr().to_ip().map_or(wanted.port(), |a| a.port());
-    let token = random_token()?;
+    let token = crate::keys::random_hex(16)?;
     let page = PAGE.replace("__JETON__", &token);
     let secret = token.clone();
     std::thread::spawn(move || {
@@ -143,13 +143,6 @@ pub fn token_matches(given: Option<&str>, token: &str) -> bool {
     given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
 }
 
-fn random_token() -> Result<String> {
-    let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut bytes))
-        .context("drawing the interface's secret")?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
-}
 
 #[cfg(test)]
 mod tests {

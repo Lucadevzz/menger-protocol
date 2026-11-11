@@ -9,7 +9,7 @@ use menger_core::stability::{Action, Params, Position, Role};
 use menger_core::unit::{format_mengers_fr, format_sats_fr as sats_fr, grams, parse_mengers, SatsPerMenger};
 use menger_ln::api::{self, ApiContext, Sandbox};
 use menger_ln::keys;
-use menger_ln::party::{close_reason_text, short_id, MIN_ADJUST_SATS};
+use menger_ln::party::{close_reason_text, short_id, ReturnChannel, MIN_ADJUST_SATS};
 use menger_ln::prices::{self, Source};
 use menger_ln::regtest::{free_port, Bitcoind};
 use menger_ln::web::{self, ApiCall, ApiReply};
@@ -69,9 +69,10 @@ struct RunArgs {
     data: PathBuf,
     #[arg(long, value_enum, default_value = "signet")]
     network: NetworkArg,
-    /// Adresse d'écoute Lightning.
-    #[arg(long, default_value = "0.0.0.0:9735")]
-    listen: String,
+    /// Adresse d'écoute Lightning. Par défaut : 0.0.0.0:9735 pour un fournisseur, aucune pour un
+    /// épargnant (c'est lui qui appelle son fournisseur).
+    #[arg(long)]
+    listen: Option<String>,
     /// Serveur Esplora (par exemple https://mutinynet.com/api).
     #[arg(long, conflicts_with = "bitcoind_rpc")]
     esplora: Option<String>,
@@ -91,6 +92,33 @@ struct RunArgs {
     /// Épargnant : prix de la stabilité, en millionièmes par an (20000 = 2 % payés par l'épargnant).
     #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
     rate_ppm: i64,
+    /// Épargnant : écart toléré entre son prix et celui du fournisseur quand la position change,
+    /// en millionièmes (3000 = 0,3 %). Au-delà, le changement est refusé.
+    #[arg(long, default_value_t = 3_000)]
+    ecart_max_ppm: u64,
+    /// Fournisseur : sa marge sur chaque changement de position, en millionièmes (0 = aucune).
+    #[arg(long, default_value_t = 0)]
+    marge_ppm: u64,
+    /// Fournisseur : prix de la stabilité le plus bas qu'il accepte, en millionièmes par an.
+    #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+    taux_min_ppm: i64,
+    /// Heures laissées à l'autre partie pour payer quand elle est injoignable, avant de fermer.
+    /// Par défaut : 6 pour un épargnant, 72 pour un fournisseur.
+    #[arg(long)]
+    attente_hors_ligne: Option<u32>,
+    /// Fournisseur : nom du nœud sur le réseau, nécessaire pour ouvrir des canaux publics.
+    #[arg(long)]
+    nom: Option<String>,
+    /// Fournisseur : ouvre en retour, vers chaque épargnant qui ouvre un canal, un canal de ce
+    /// pourcentage du sien (100 = la même taille ; 0 = jamais).
+    #[arg(long, default_value_t = 0)]
+    canal_retour: u32,
+    /// Fournisseur : taille minimale du canal d'un épargnant pour ouvrir un canal en retour, en sats.
+    #[arg(long, default_value_t = 100_000)]
+    canal_retour_min: u64,
+    /// Fournisseur : taille maximale d'un canal ouvert en retour, en sats.
+    #[arg(long, default_value_t = 5_000_000)]
+    canal_retour_max: u64,
     /// Épargnant : son fournisseur, `clé@hôte:port`.
     #[arg(long)]
     fournisseur: Option<String>,
@@ -114,13 +142,21 @@ struct RunArgs {
 
 const HELP: &str = "\
 Commandes :
-  etat                          ce que tu détiens
-  adresse                       une adresse pour recevoir des bitcoins sur la chaîne
-  canal CLÉ@HÔTE:PORT SATS      ouvre un canal avec tes propres bitcoins
-  stabiliser SATS | tout        épargnant : garde ces sats stables en or
-  facture MNGR                  une facture Lightning de ce montant en Mengers (ex. : facture 0,5)
-  payer FACTURE                 épargnant : paie une facture Lightning depuis ton solde
-  quitter";
+  etat                             ce que tu détiens
+  adresse                          une adresse pour recevoir des bitcoins sur la chaîne
+  retirer ADRESSE SATS | tout      envoie des bitcoins du portefeuille vers une adresse Bitcoin
+  canal CLÉ@HÔTE:PORT SATS         ouvre un canal avec tes propres bitcoins
+  facture MNGR                     une facture Lightning de ce montant en Mengers (ex. : facture 0,5)
+Épargnant :
+  stabiliser SATS | tout           garde ces sats stables en or
+  reprendre SATS | tout            reprend ces sats en bitcoin
+  payer FACTURE                    paie une facture Lightning depuis ton solde
+  annuler                          abandonne un paiement qui n'est pas encore parti
+  partir [force]                   quitte ton fournisseur : ferme les canaux, les bitcoins reviennent sur la chaîne
+Fournisseur :
+  canal-public CLÉ@HÔTE:PORT SATS  ouvre un canal connu du réseau, vers un nœud bien connecté
+  fermer DÉBUT-DE-CLÉ [force]      ferme les canaux avec un épargnant
+  quitter                          arrête le programme";
 
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
@@ -195,6 +231,14 @@ fn status(party: &Party, t: i64) -> String {
             if let Some(spend) = &party.state.spend {
                 s += &format!("\nPaiement en cours : {} sats", sats_fr(spend.sats));
             }
+            if let Some(peer) = party.provider().ok().and_then(|p| party.peer(&p)) {
+                if let Some(since) = peer.unreachable_since {
+                    s += &format!("\nFournisseur injoignable depuis {} min", (t - since).max(0) / 60);
+                }
+                if let Some(why) = &peer.closed {
+                    s += &format!("\nCanaux fermés : {why}");
+                }
+            }
         }
         Role::Provider => {
             let savers: Vec<_> = party.state.peers.iter().filter_map(|(k, p)| Some((k, p.position.as_ref()?))).collect();
@@ -213,7 +257,21 @@ fn status(party: &Party, t: i64) -> String {
         }
     }
     s += &format!("\nSur la chaîne : {} sats", sats_fr(party.onchain_spendable_sats()));
+    let returning = party.returning_sats();
+    if returning > 0 {
+        s += &format!("\nEn train de revenir sur la chaîne : {} sats", sats_fr(returning));
+    }
     s
+}
+
+/// The saver whose node id starts with `prefix`, if there is exactly one.
+fn find_saver(party: &Party, prefix: &str) -> Result<PublicKey> {
+    let matches: Vec<&String> = party.state.peers.keys().filter(|k| k.starts_with(prefix)).collect();
+    match matches.as_slice() {
+        [one] => PublicKey::from_str(one).map_err(|e| anyhow!("clé invalide : {e}")),
+        [] => bail!("aucun épargnant dont la clé commence par {prefix}"),
+        _ => bail!("plusieurs épargnants commencent par {prefix} : donne plus de caractères"),
+    }
 }
 
 /// Runs one interactive command; true to quit.
@@ -237,10 +295,46 @@ fn command(party: &mut Party, line: &str, sources: &[Box<dyn Source>]) -> Result
             party.open_channel(key, &addr, sats.parse().context("montant en sats")?)?;
             println!("Canal demandé : il sera prêt après confirmation sur la chaîne.");
         }
+        ("canal-public", [spec, sats]) => {
+            let (key, addr) = parse_peer(spec)?;
+            party.open_public_channel(key, &addr, sats.parse().context("montant en sats")?)?;
+            println!("Canal public demandé : il sera annoncé au réseau après 6 confirmations.");
+        }
         ("stabiliser", [amount]) => {
             let sats = if *amount == "tout" { party.free_sats() } else { amount.parse().context("montant en sats")? };
             party.stabilize(sats, &quotes(), t)?;
             println!("Demande envoyée au fournisseur : {sats} sats à garder stables.");
+        }
+        ("reprendre", [amount]) => {
+            let sats = if *amount == "tout" { None } else { Some(amount.parse().context("montant en sats")?) };
+            party.release(sats, &quotes(), t)?;
+            println!("Demande envoyée au fournisseur : ces sats redeviennent du bitcoin.");
+        }
+        ("annuler", _) => {
+            party.cancel_spend(t)?;
+            println!("Paiement annulé.");
+        }
+        ("retirer", [address, amount]) => {
+            let sats = if *amount == "tout" { None } else { Some(amount.parse().context("montant en sats")?) };
+            let txid = party.withdraw(address, sats, t)?;
+            println!("Retrait envoyé : transaction {txid}");
+        }
+        ("partir", rest) => {
+            let force = matches!(rest, ["force"]);
+            party.leave(force, t)?;
+            println!("{}", if force {
+                "Sortie forcée : tes bitcoins reviennent sur la chaîne après le délai du canal (environ un jour)."
+            } else {
+                "Sortie demandée : tes bitcoins reviennent sur la chaîne dès que la fermeture est confirmée."
+            });
+        }
+        ("fermer", [prefix, rest @ ..]) => {
+            if party.role() != Role::Provider {
+                bail!("seul un fournisseur ferme les canaux d'un épargnant ; un épargnant utilise « partir »");
+            }
+            let peer = find_saver(party, prefix)?;
+            party.begin_close(&peer, "fermé par le fournisseur", matches!(rest, ["force"]), t)?;
+            println!("Fermeture demandée.");
         }
         ("facture", [amount]) => {
             let micro = parse_mengers(amount).ok_or_else(|| anyhow!("montant en Mengers attendu, par exemple 0,5"))?;
@@ -292,9 +386,24 @@ fn run(a: RunArgs) -> Result<()> {
         },
     };
     let provider = a.fournisseur.as_deref().map(parse_peer).transpose()?;
-    let mut cfg = PartyConfig::new(role, a.data.clone(), network, a.listen.clone(), chain);
+    let listen = a.listen.clone().or_else(|| (role == Role::Provider).then(|| "0.0.0.0:9735".to_string()));
+    let mut cfg = PartyConfig::new(role, a.data.clone(), network, listen, chain);
     cfg.price_rules = PriceRules { min_sources: a.min_sources, ..PriceRules::default() };
     cfg.rate_ppm_per_year = a.rate_ppm;
+    cfg.max_slippage_ppm = a.ecart_max_ppm;
+    cfg.adjust_rules.spread_ppm = a.marge_ppm;
+    cfg.adjust_rules.min_rate_ppm_per_year = a.taux_min_ppm;
+    if let Some(hours) = a.attente_hors_ligne {
+        cfg.params.offline_grace_secs = i64::from(hours) * 3_600;
+    }
+    cfg.alias = a.nom.clone();
+    if a.canal_retour > 0 {
+        cfg.return_channel = Some(ReturnChannel {
+            ratio_ppm: u64::from(a.canal_retour) * 10_000,
+            min_sats: a.canal_retour_min,
+            max_sats: a.canal_retour_max,
+        });
+    }
     cfg.provider = provider.clone();
     cfg.auto_stabilize = !a.sans_stabilisation_auto;
     if a.restaurer {
@@ -451,9 +560,13 @@ struct Who {
 fn start_party(dir: &Path, b: &Bitcoind, name: &'static str, role: Role, provider: Option<&Who>, params: &Params) -> Result<Who> {
     let addr = format!("127.0.0.1:{}", free_port());
     let chain = ChainSource::BitcoindRpc { host: "127.0.0.1".into(), port: b.rpc_port, user: b.user.clone(), password: b.password.clone() };
-    let mut cfg = PartyConfig::new(role, dir.join(name.to_lowercase()), Network::Regtest, addr.clone(), chain);
-    cfg.params = params.clone();
+    let mut cfg = PartyConfig::new(role, dir.join(name.to_lowercase()), Network::Regtest, Some(addr.clone()), chain);
+    cfg.params = Params { offline_grace_secs: cfg.params.offline_grace_secs, ..params.clone() };
     cfg.provider = provider.map(|p| (p.p.node_id(), p.addr.clone()));
+    if role == Role::Provider {
+        // A saver who opens a channel from its page gets one in return.
+        cfg.return_channel = Some(ReturnChannel { ratio_ppm: 1_000_000, min_sats: 100_000, max_sats: 5_000_000 });
+    }
     Ok(Who { p: Party::start(cfg)?, addr, name })
 }
 

@@ -51,6 +51,8 @@
                                 background: var(--card); color: var(--ink); font-weight: 600; cursor: pointer; }
   .essai button { margin-top: 8px; padding: 7px 12px; font-size: 14px; }
   button.primary { background: var(--gold); color: #fff; border-color: var(--gold); }
+  .card button.danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+  .sep { border-top: 1px dashed var(--line); margin: 18px 0 14px; }
   button:disabled { opacity: .5; cursor: default; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; }
   .hint { color: var(--muted); font-size: 14px; margin-top: 6px; min-height: 1.2em; }
@@ -102,7 +104,7 @@
     <button class="tab active" data-tab="recevoir">Recevoir</button>
     <button class="tab" data-tab="payer">Payer</button>
     <button class="tab" data-tab="garder">Épargner</button>
-    <button class="tab" data-tab="deposer">Déposer</button>
+    <button class="tab" data-tab="deposer">Bitcoin</button>
   </nav>
 
   <section class="card" id="p-recevoir">
@@ -127,6 +129,10 @@
       <div class="muted" id="verif-desc"></div>
       <button class="primary" id="btn-payer">Payer</button>
     </div>
+    <div id="paiement-en-cours" class="resultat" hidden>
+      <div class="muted" id="paiement-texte"></div>
+      <button id="btn-annuler">Annuler ce paiement</button>
+    </div>
   </section>
 
   <section class="card" id="p-garder" hidden>
@@ -137,6 +143,16 @@
     <div class="row">
       <button class="primary" id="btn-garder">Garder en or</button>
       <button id="btn-tout">Tout garder en or</button>
+    </div>
+    <div id="reprendre" hidden>
+      <div class="sep"></div>
+      <p>En or : <b id="en-or"></b></p>
+      <label for="montant-reprendre">Sats à reprendre en bitcoin</label>
+      <div class="input-unit"><input id="montant-reprendre" inputmode="numeric" placeholder="100000" autocomplete="off"><span>sats</span></div>
+      <div class="row">
+        <button id="btn-reprendre">Reprendre en bitcoin</button>
+        <button id="btn-tout-reprendre">Tout reprendre</button>
+      </div>
     </div>
   </section>
 
@@ -154,11 +170,28 @@
       <button id="btn-canal">Ouvrir le canal</button>
     </div>
     <p class="muted" id="canaux" style="margin-top:12px"></p>
+    <div class="sep"></div>
+    <label for="adresse-retrait">Retirer vers une adresse Bitcoin</label>
+    <textarea id="adresse-retrait" rows="2" placeholder="bc1…" spellcheck="false"></textarea>
+    <div class="input-unit" style="margin-top:8px"><input id="montant-retrait" inputmode="numeric" placeholder="100000" autocomplete="off"><span>sats</span></div>
+    <div class="row">
+      <button id="btn-retirer">Retirer</button>
+      <button id="btn-tout-retirer">Tout retirer</button>
+    </div>
+    <div id="quitter" hidden>
+      <div class="sep"></div>
+      <label>Quitter ton fournisseur</label>
+      <p class="muted" id="quitter-texte"></p>
+      <div class="row">
+        <button id="btn-quitter">Quitter le fournisseur</button>
+        <button id="btn-quitter-oui" class="danger" hidden>Oui, fermer mes canaux</button>
+      </div>
+    </div>
   </section>
 
   <section class="card" id="p-fournisseur" hidden>
     <table>
-      <thead><tr><th>Épargnant</th><th class="num">MNGR</th><th class="num">Sats chez lui</th><th class="num">Notre côté</th></tr></thead>
+      <thead><tr><th>Épargnant</th><th class="num">MNGR</th><th class="num">Sats chez lui</th><th class="num">Notre côté</th><th class="num">État</th></tr></thead>
       <tbody id="epargnants"></tbody>
     </table>
   </section>
@@ -198,6 +231,15 @@ async function api(chemin, corps) {
 const mengers = (micro) => n4.format(micro / 1e6);
 const sats = (n) => nf.format(n) + " sats";
 const heure = (at) => new Date(at * 1000).toLocaleTimeString("fr-CH", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const entier = (id) => parseInt($(id).value.replace(/[\s'\u202f\u00a0]/g, ""), 10);
+
+function duree(secondes) {
+  const s = Math.max(0, Math.round(secondes));
+  if (s < 90) return s + " s";
+  if (s < 5400) return Math.round(s / 60) + " min";
+  if (s < 172800) return Math.round(s / 3600) + " h";
+  return Math.round(s / 86400) + " jours";
+}
 
 function message(texte, erreur) {
   const m = $("message");
@@ -269,7 +311,7 @@ function afficher(s) {
   $("reseau").textContent = s.reseau;
   $("reseau").classList.toggle("danger", s.vrais_bitcoins);
   $("noeud").textContent = (s.role === "fournisseur" ? "Fournisseur" : "Épargnant") + " · nœud " + s.noeud.slice(0, 10) + "…";
-  $("chaine").textContent = sats(s.chaine_sats);
+  $("chaine").textContent = sats(s.chaine_sats) + (s.retour_sats > 0 ? " · " + sats(s.retour_sats) + " en train de revenir" : "");
   afficherEssai(s);
   afficherJournal(s);
   const statuts = [];
@@ -292,7 +334,10 @@ function afficher(s) {
     corps.replaceChildren();
     for (const e of s.epargnants) {
       const tr = document.createElement("tr");
-      const cellules = [e.noeud.slice(0, 10) + "…", mengers(e.micro), nf.format(e.sats), nf.format(e.notre_cote_sats)];
+      let situation = e.en_ligne === false ? "hors ligne" : "en ligne";
+      if (e.ecart_sats > 0 && e.sats > 0 && e.ecart_sats * 1000 >= e.sats) situation += ", doit " + nf.format(e.ecart_sats);
+      if (e.ferme) situation = "fermé";
+      const cellules = [e.noeud.slice(0, 10) + "…", mengers(e.micro), nf.format(e.sats), nf.format(e.notre_cote_sats), situation];
       cellules.forEach((texte, i) => {
         const td = document.createElement("td");
         td.textContent = texte;
@@ -312,19 +357,48 @@ function afficher(s) {
   $("mengers").textContent = st ? mengers(st.micro) : mengers(0);
   $("grammes").textContent = st ? n2.format(st.grammes) + " g d'or" : "Rien de gardé en or pour l'instant";
   afficherPrix(s, st ? st.valeur_sats : null);
-  if (s.canaux.prets === 0) {
-    statuts.push(pastille(s.canaux.en_attente ? "Canal en cours d'ouverture" : "Aucun canal : va dans « Déposer »", !s.canaux.en_attente));
+  const canaux = s.canaux.prets + s.canaux.en_attente;
+  const joignable = s.canaux.prets > 0;
+  if (s.fermeture_en_cours) {
+    statuts.push(pastille(s.sortie_forcee
+      ? "Sortie forcée : tes bitcoins reviennent sur la chaîne après le délai du canal"
+      : "Fermeture des canaux en cours…", true));
+  } else if (s.injoignable_depuis != null) {
+    statuts.push(pastille("Fournisseur injoignable depuis " + duree(s.maintenant - s.injoignable_depuis), true));
+  } else if (canaux === 0) {
+    statuts.push(pastille("Aucun canal : va dans « Bitcoin »", true));
+  } else if (!joignable) {
+    statuts.push(pastille("Canal en cours d'ouverture"));
+  }
+  if (s.doit) statuts.push(pastille("Ton fournisseur te doit " + sats(s.doit.sats) + " depuis " + duree(s.maintenant - s.doit.depuis), true));
+  if (s.couverture_faible_ppm != null) {
+    statuts.push(pastille("Ton fournisseur ne couvre plus qu'une baisse de " + Math.floor(s.couverture_faible_ppm / 10000) + " % du bitcoin", true));
   }
   if (s.demande) statuts.push(pastille("En attente de ton fournisseur…"));
   if (s.paiement) statuts.push(pastille(s.paiement.envoye ? "Paiement en route…" : "Paiement en préparation…"));
   if (s.a_stabiliser_sats > 0) statuts.push(pastille(sats(s.a_stabiliser_sats) + " bientôt gardés en or"));
   if (s.libres_sats > 0) statuts.push(pastille(sats(s.libres_sats) + " libres, en bitcoin"));
-  if (s.ferme) statuts.push(pastille("Canaux fermés : " + s.ferme, true));
+  if (s.retour_sats > 0) statuts.push(pastille(sats(s.retour_sats) + " en train de revenir sur la chaîne"));
+  if (s.ferme && !s.fermeture_en_cours) statuts.push(pastille("Canaux fermés : " + s.ferme, true));
   $("statuts").replaceChildren(...statuts);
   $("libres").textContent = sats(s.libres_sats);
-  $("ouvrir").hidden = !(s.peut_ouvrir_canal && s.canaux.prets + s.canaux.en_attente === 0);
+  $("reprendre").hidden = !st;
+  $("en-or").textContent = st ? sats(st.sats) : "";
+  const attente = s.paiement && !s.paiement.envoye;
+  $("paiement-en-cours").hidden = !attente;
+  if (attente) $("paiement-texte").textContent = "Paiement de " + sats(s.paiement.sats) + " en préparation.";
+  $("ouvrir").hidden = !(s.peut_ouvrir_canal && canaux === 0 && !s.fermeture_en_cours);
   $("canaux").textContent = "Canaux avec ton fournisseur : " + s.canaux.prets + " prêt" + (s.canaux.prets > 1 ? "s" : "") +
-    (s.canaux.en_attente ? ", " + s.canaux.en_attente + " en attente de confirmation" : "") + ".";
+    (s.canaux.en_attente ? ", " + s.canaux.en_attente + (joignable || s.injoignable_depuis == null ? " en attente de confirmation" : " en attente") : "") + ".";
+  $("deposer-texte").textContent = canaux === 0
+    ? "Pour commencer, envoie des bitcoins à ton portefeuille, puis ouvre un canal vers ton fournisseur."
+    : "Ton portefeuille sur la chaîne : les bitcoins qui ne sont pas dans tes canaux.";
+  $("quitter").hidden = canaux === 0 || s.fermeture_en_cours;
+  if ($("quitter").hidden) $("btn-quitter-oui").hidden = true;
+  $("quitter-texte").textContent = joignable
+    ? "Tes canaux se ferment à l'amiable, ton solde en or s'arrête et tes bitcoins reviennent sur la chaîne dès la prochaine confirmation."
+    : "Ton fournisseur est injoignable : la sortie sera forcée. Tes bitcoins reviennent après " + (s.delai_blocs || 144) +
+      " blocs (environ " + duree((s.delai_blocs || 144) * 600) + "), avec plus de frais.";
 }
 
 async function rafraichir() {
@@ -385,7 +459,7 @@ $("btn-payer").addEventListener("click", () => action($("btn-payer"), async () =
 }));
 
 $("btn-garder").addEventListener("click", () => action($("btn-garder"), async () => {
-  const n = parseInt($("montant-garder").value.replace(/[\s']/g, ""), 10);
+  const n = entier("montant-garder");
   if (!(n > 0)) throw new Error("Indique un nombre de sats.");
   await api("/api/stabiliser", { sats: n });
   $("montant-garder").value = "";
@@ -405,10 +479,55 @@ $("btn-adresse").addEventListener("click", () => action($("btn-adresse"), async 
 }));
 
 $("btn-canal").addEventListener("click", () => action($("btn-canal"), async () => {
-  const n = parseInt($("montant-canal").value.replace(/[\s']/g, ""), 10);
+  const n = entier("montant-canal");
   if (!(n > 0)) throw new Error("Indique un nombre de sats.");
   await api("/api/canal", { sats: n });
   message("Canal demandé : il sera prêt après sa confirmation sur la chaîne.");
+}));
+
+$("btn-reprendre").addEventListener("click", () => action($("btn-reprendre"), async () => {
+  const n = entier("montant-reprendre");
+  if (!(n > 0)) throw new Error("Indique un nombre de sats.");
+  await api("/api/reprendre", { sats: n });
+  $("montant-reprendre").value = "";
+  message("Demande envoyée à ton fournisseur : ces sats redeviennent du bitcoin.");
+}));
+
+$("btn-tout-reprendre").addEventListener("click", () => action($("btn-tout-reprendre"), async () => {
+  await api("/api/reprendre", { tout: true });
+  message("Demande envoyée à ton fournisseur : tout ton solde redevient du bitcoin.");
+}));
+
+$("btn-annuler").addEventListener("click", () => action($("btn-annuler"), async () => {
+  await api("/api/annuler", {});
+  message("Paiement annulé.");
+}));
+
+async function retirer(corps) {
+  const adresse = $("adresse-retrait").value.trim();
+  if (!adresse) throw new Error("Indique une adresse Bitcoin.");
+  const r = await api("/api/retirer", { adresse, ...corps });
+  $("adresse-retrait").value = "";
+  $("montant-retrait").value = "";
+  message("Retrait envoyé. Transaction " + r.transaction.slice(0, 16) + "…");
+}
+
+$("btn-retirer").addEventListener("click", () => action($("btn-retirer"), async () => {
+  const n = entier("montant-retrait");
+  if (!(n > 0)) throw new Error("Indique un nombre de sats.");
+  await retirer({ sats: n });
+}));
+
+$("btn-tout-retirer").addEventListener("click", () => action($("btn-tout-retirer"), () => retirer({ tout: true })));
+
+// Leaving takes two clicks: the second button appears only after the first.
+$("btn-quitter").addEventListener("click", () => { $("btn-quitter-oui").hidden = false; });
+
+$("btn-quitter-oui").addEventListener("click", () => action($("btn-quitter-oui"), async () => {
+  const forcer = !(etat && etat.canaux.prets > 0);
+  await api("/api/partir", { forcer });
+  $("btn-quitter-oui").hidden = true;
+  message(forcer ? "Sortie forcée demandée." : "Fermeture demandée : tes bitcoins reviennent sur la chaîne.");
 }));
 
 document.querySelectorAll("[data-btc], [data-or]").forEach((bouton) => bouton.addEventListener("click", () =>

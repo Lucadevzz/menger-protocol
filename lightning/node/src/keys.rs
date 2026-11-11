@@ -49,6 +49,13 @@ pub fn load_or_create(data_dir: &Path, restore: Option<&str>) -> Result<Keys> {
     Ok(Keys { entropy: NodeEntropy::from_bip39_mnemonic(mnemonic, None), new_phrase, restored })
 }
 
+/// Random bytes from the operating system, in hex: for secrets that live as long as one run.
+pub fn random_hex(bytes: usize) -> Result<String> {
+    let mut buffer = vec![0u8; bytes];
+    getrandom::getrandom(&mut buffer).map_err(|e| anyhow!("no randomness from the system: {e}"))?;
+    Ok(buffer.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 fn parse(text: &str) -> Result<Mnemonic> {
     let words = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
     Mnemonic::parse(&words).map_err(|e| anyhow!("phrase de récupération invalide : {e}"))
@@ -91,6 +98,14 @@ mod tests {
         }
         let again = load_or_create(dir.path(), None).unwrap();
         assert!(again.new_phrase.is_none() && !again.restored);
+    }
+
+    #[test]
+    fn secrets_are_random() {
+        let (a, b) = (random_hex(16).unwrap(), random_hex(16).unwrap());
+        assert_eq!(a.len(), 32);
+        assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
     }
 
     #[test]
