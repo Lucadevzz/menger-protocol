@@ -388,8 +388,10 @@ function afficher(s) {
   $("paiement-en-cours").hidden = !attente;
   if (attente) $("paiement-texte").textContent = "Paiement de " + sats(s.paiement.sats) + " en préparation.";
   $("ouvrir").hidden = !(s.peut_ouvrir_canal && canaux === 0 && !s.fermeture_en_cours);
-  $("canaux").textContent = "Canaux avec ton fournisseur : " + s.canaux.prets + " prêt" + (s.canaux.prets > 1 ? "s" : "") +
-    (s.canaux.en_attente ? ", " + s.canaux.en_attente + (joignable || s.injoignable_depuis == null ? " en attente de confirmation" : " en attente") : "") + ".";
+  $("canaux").textContent = s.injoignable_depuis != null
+    ? "Canaux avec ton fournisseur : " + canaux + ", en pause tant qu'il est injoignable."
+    : "Canaux avec ton fournisseur : " + s.canaux.prets + " prêt" + (s.canaux.prets > 1 ? "s" : "") +
+      (s.canaux.en_attente ? ", " + s.canaux.en_attente + " en attente de confirmation" : "") + ".";
   $("deposer-texte").textContent = canaux === 0
     ? "Pour commencer, envoie des bitcoins à ton portefeuille, puis ouvre un canal vers ton fournisseur."
     : "Ton portefeuille sur la chaîne : les bitcoins qui ne sont pas dans tes canaux.";

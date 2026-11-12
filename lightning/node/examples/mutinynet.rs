@@ -5,7 +5,9 @@
 //!   cargo run --example mutinynet -- lancer DOSSIER MINUTES
 //!
 //! Les deux nœuds tournent dans ce programme et se parlent par Lightning en local ; la chaîne
-//! (financement, ouverture et fermeture des canaux) est la chaîne publique de Mutinynet.
+//! (financement, ouverture et fermeture des canaux) est la chaîne publique de Mutinynet. Comme
+//! dans la vraie vie, l'épargnant n'écoute pas le réseau : il appelle son fournisseur, qui ouvre
+//! de lui-même un canal en retour.
 
 use anyhow::{bail, Result};
 use ldk_node::bitcoin::secp256k1::PublicKey;
@@ -13,6 +15,7 @@ use ldk_node::bitcoin::Network;
 use menger_core::price::PriceRules;
 use menger_core::stability::{Action, Params, Role};
 use menger_core::unit::{format_mengers, grams};
+use menger_ln::party::ReturnChannel;
 use menger_ln::prices;
 use menger_ln::{ChainSource, Party, PartyConfig};
 use std::path::Path;
@@ -20,21 +23,23 @@ use std::time::{Duration, Instant};
 
 const ESPLORA: &str = "https://mutinynet.com/api";
 const PROVIDER_LISTEN: &str = "127.0.0.1:19735";
-const SAVER_LISTEN: &str = "127.0.0.1:19736";
 const CHANNEL_SATS: u64 = 400_000;
 const STABLE_SATS: u64 = 200_000;
 
 fn start(role: Role, dir: &Path, provider: Option<PublicKey>) -> Result<Party> {
     let (name, listen) = match role {
-        Role::Saver => ("epargnant", SAVER_LISTEN),
-        Role::Provider => ("fournisseur", PROVIDER_LISTEN),
+        Role::Saver => ("epargnant", None),
+        Role::Provider => ("fournisseur", Some(PROVIDER_LISTEN.to_string())),
     };
     let chain = ChainSource::Esplora { url: ESPLORA.into() };
-    let mut cfg = PartyConfig::new(role, dir.join(name), Network::Signet, Some(listen.into()), chain);
+    let mut cfg = PartyConfig::new(role, dir.join(name), Network::Signet, listen, chain);
     // Seuils fins pour voir les paiements suivre les petits mouvements réels du prix.
-    cfg.params = Params { threshold_ppm: 100, min_payment_sats: 10, cooldown_secs: 30, ..Params::default() };
+    cfg.params = Params { threshold_ppm: 100, min_payment_sats: 10, cooldown_secs: 30, ..cfg.params };
     cfg.price_rules = PriceRules::default();
     cfg.provider = provider.map(|key| (key, PROVIDER_LISTEN.to_string()));
+    if role == Role::Provider {
+        cfg.return_channel = Some(ReturnChannel { ratio_ppm: 1_000_000, min_sats: 100_000, max_sats: CHANNEL_SATS });
+    }
     Party::start(cfg)
 }
 
@@ -76,20 +81,22 @@ fn main() -> Result<()> {
 
     if provider.node.list_channels().is_empty() {
         saver.open_channel(provider.node_id(), PROVIDER_LISTEN, CHANNEL_SATS)?;
-        provider.open_channel(saver.node_id(), SAVER_LISTEN, CHANNEL_SATS)?;
-        println!("Canaux demandés : {CHANNEL_SATS} sats de chaque côté. Attente des confirmations (un bloc toutes les 30 s)…");
+        println!("Canal de {CHANNEL_SATS} sats demandé par l'épargnant ; le fournisseur ouvrira le sien en retour une fois le premier confirmé (un bloc toutes les 30 s)…");
     }
     let t = now();
     let (q, _) = prices::read_all(&sources, t);
-    let deadline = Instant::now() + Duration::from_secs(1_200);
+    let _ = q;
+    let deadline = Instant::now() + Duration::from_secs(1_800);
     while saver.channels_with(&pk_p).len() < 2 || provider.channels_with(&pk_s).len() < 2 {
         if Instant::now() > deadline {
-            bail!("canaux pas prêts après 20 minutes");
+            bail!("canaux pas prêts après 30 minutes");
         }
         std::thread::sleep(Duration::from_secs(15));
         provider.sync();
         saver.sync();
-        for e in saver.tick(&q, now())?.events.into_iter().chain(provider.tick(&q, now())?.events) {
+        let t = now();
+        let (q, _) = prices::read_all(&sources, t);
+        for e in saver.tick(&q, t)?.events.into_iter().chain(provider.tick(&q, t)?.events) {
             println!("  {e}");
         }
     }

@@ -134,6 +134,28 @@ mod tests {
     }
 
     #[test]
+    fn the_signed_bytes_are_fixed() {
+        // What is signed is part of the protocol: another program must produce exactly these bytes.
+        let bytes = |body: &Body| String::from_utf8(Envelope::signing_bytes("02ab", "03ef", body)).unwrap();
+        assert_eq!(
+            bytes(&Body::Adjust { at: 1_793_793_600, delta_backing: -246_128, limit_micro: 501_500, rate_ppm_per_year: 20_000 }),
+            r#"{"v":3,"from":"02ab","to":"03ef","kind":"adjust","at":1793793600,"delta_backing":-246128,"limit_micro":501500,"rate_ppm_per_year":20000}"#
+        );
+        assert_eq!(
+            bytes(&Body::Reply { at: 1_793_793_600, accepted: true, delta_micro: -500_001, reason: None }),
+            r#"{"v":3,"from":"02ab","to":"03ef","kind":"reply","at":1793793600,"accepted":true,"delta_micro":-500001,"reason":null}"#
+        );
+        assert_eq!(
+            bytes(&Body::Reply { at: 5, accepted: false, delta_micro: 0, reason: Some("trop tard".into()) }),
+            r#"{"v":3,"from":"02ab","to":"03ef","kind":"reply","at":5,"accepted":false,"delta_micro":0,"reason":"trop tard"}"#
+        );
+        assert_eq!(
+            bytes(&Body::Stability { sats_per_menger: SatsPerMenger(492_255), backing_after: 984_510 }),
+            r#"{"v":3,"from":"02ab","to":"03ef","kind":"stability","sats_per_menger":492255,"backing_after":984510}"#
+        );
+    }
+
+    #[test]
     fn ignores_other_versions_and_garbage() {
         let old = br#"{"v":2,"from":"02","sig":"x","kind":"stability","sats_per_menger":1,"backing_after":1}"#;
         assert_eq!(Envelope::decode(old), None);
