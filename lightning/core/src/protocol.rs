@@ -45,6 +45,10 @@ pub enum Body {
         #[serde(default)]
         delta_micro: i64,
         reason: Option<String>,
+        /// Refused because the saver owes this many satoshis at the provider's price: paying them
+        /// first lets the position end. Left out when zero.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        owed_sats: u64,
     },
     /// Either side: the payment carrying this message is a stability payment.
     Stability {
@@ -53,6 +57,10 @@ pub enum Body {
         /// The saver's backing after this payment, as the payer computes it.
         backing_after: u64,
     },
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Serialize)]
@@ -129,7 +137,7 @@ mod tests {
         forged.to = "03cd".into();
         assert!(!forged.verify(|b, s| fake_sign(b) == s));
         let mut forged = back;
-        forged.body = Body::Reply { at: 1, accepted: true, delta_micro: 1, reason: None };
+        forged.body = Body::Reply { at: 1, accepted: true, delta_micro: 1, reason: None, owed_sats: 0 };
         assert!(!forged.verify(|b, s| fake_sign(b) == s));
     }
 
@@ -142,12 +150,16 @@ mod tests {
             r#"{"v":3,"from":"02ab","to":"03ef","kind":"adjust","at":1793793600,"delta_backing":-246128,"limit_micro":501500,"rate_ppm_per_year":20000}"#
         );
         assert_eq!(
-            bytes(&Body::Reply { at: 1_793_793_600, accepted: true, delta_micro: -500_001, reason: None }),
+            bytes(&Body::Reply { at: 1_793_793_600, accepted: true, delta_micro: -500_001, reason: None, owed_sats: 0 }),
             r#"{"v":3,"from":"02ab","to":"03ef","kind":"reply","at":1793793600,"accepted":true,"delta_micro":-500001,"reason":null}"#
         );
         assert_eq!(
-            bytes(&Body::Reply { at: 5, accepted: false, delta_micro: 0, reason: Some("trop tard".into()) }),
+            bytes(&Body::Reply { at: 5, accepted: false, delta_micro: 0, reason: Some("trop tard".into()), owed_sats: 0 }),
             r#"{"v":3,"from":"02ab","to":"03ef","kind":"reply","at":5,"accepted":false,"delta_micro":0,"reason":"trop tard"}"#
+        );
+        assert_eq!(
+            bytes(&Body::Reply { at: 5, accepted: false, delta_micro: 0, reason: None, owed_sats: 1_234 }),
+            r#"{"v":3,"from":"02ab","to":"03ef","kind":"reply","at":5,"accepted":false,"delta_micro":0,"reason":null,"owed_sats":1234}"#
         );
         assert_eq!(
             bytes(&Body::Stability { sats_per_menger: SatsPerMenger(492_255), backing_after: 984_510 }),

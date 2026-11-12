@@ -22,6 +22,7 @@ Projet de Matteo (GitHub Lucadevzz) : une monnaie privée indexée sur l'or, **1
 - **Nom.** Ducat, puis Catallax, puis **Menger** (choisi le 3 novembre 2026). Ducat Protocol occupe « Ducat », et un protocole Nostr s'appelle déjà Catallax.
 - **Bitcoin plutôt qu'Ethereum** pour la version finale. Les canaux Lightning ne demandent ni jeton, ni pont, ni oracle commun : chaque partie lit ses propres prix. Les covenants ne sont pas activés sur Bitcoin. Citrea a été écarté à cause de son conseil de sécurité, et le WBTC parce qu'il dépend d'un dépositaire.
 - **Le fournisseur fixe le prix d'un changement de position** (messages version 3, 11 novembre 2026). L'épargnant donne les sats et la pire quantité de Mengers qu'il accepte (0,3 % d'écart par défaut) ; le fournisseur calcule avec son propre prix, arrondi en sa faveur. Avant, l'épargnant nommait les Mengers et une demande « reprendre des sats sans rendre de Mengers » passait : un épargnant malhonnête pouvait vider son fournisseur. Chaque message nomme son destinataire, signé avec le reste.
+- **Une position ne se clôt que sans dette** (12 novembre 2026, après une relecture indépendante). Avant, la clôture pardonnait une dette inférieure à la tolérance : un épargnant pouvait clore et rouvrir à chaque petite hausse et ne jamais payer. Le refus indique maintenant `owed_sats` ; le nœud de l'épargnant paie et redemande (2 fois au plus). Autres corrections du même jour : délais remis à zéro au réveil (ticks à plus de 5 min d'écart), paiements en cours comptés pour le fournisseur dans sa couverture, contrôle des sats de l'épargnant même pendant des paiements qui durent plus de 10 min, renvois espacés (jusqu'à 1 h), pas de paiement pendant une demande (et l'inverse), facture déjà connue refusée.
 - **Une absence n'est pas une faute.** Une partie injoignable a un délai plus long pour payer : 6 h quand c'est l'épargnant qui attend, 72 h quand c'est le fournisseur. Avant, l'épargnant prenait un fournisseur injoignable pour un fournisseur insolvable et fermait de force aussitôt.
 - **Le fournisseur vérifie que l'épargnant détient toujours les sats de sa position.** Sinon il ne paie plus, puis ferme : un épargnant pourrait sortir ses sats du canal et garder la protection contre la baisse.
 - **Les soldes se lisent dans les canaux, sans les frais de fermeture** (ce qu'on peut envoyer plus la réserve du canal). Le montant « récupérable à la fermeture » bouge avec les frais du réseau et faisait apparaître de faux écarts.
@@ -39,7 +40,7 @@ Projet de Matteo (GitHub Lucadevzz) : une monnaie privée indexée sur l'or, **1
 
 ```bash
 forge test                                               # v0 : 71 tests
-cd lightning && cargo test --workspace                   # règles, sources, clés, application (45 + 18 tests)
+cd lightning && cargo test --workspace                   # règles, sources, clés, application (46 + 18 tests)
 BITCOIND_EXE=/chemin/bitcoind cargo test --workspace     # + les 4 tests de bout en bout (regtest)
 cargo run --release -- essai --bitcoind /chemin/bitcoind # l'application dans le navigateur, prix fictifs
 cargo run --release -- demo --bitcoind /chemin/bitcoind  # démonstration commentée

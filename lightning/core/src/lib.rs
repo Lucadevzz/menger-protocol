@@ -12,7 +12,7 @@ pub mod unit;
 
 pub use price::{menger_price, Asset, GoldMemory, PricePoint, PriceRules, Quote};
 pub use stability::{
-    adjust, adjust_limit, check_reply, decide, quote_adjust, Action, AdjustRequest, AdjustRules, CloseReason, Decision, Params,
+    adjust, adjust_limit, Refusal, check_reply, decide, quote_adjust, Action, AdjustRequest, AdjustRules, CloseReason, Decision, Params,
     Position, Role,
     Snapshot, Warning,
 };

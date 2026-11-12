@@ -65,6 +65,8 @@ fn start_with(
     let mut cfg = PartyConfig::new(role, dir.join(name), Network::Regtest, Some(addr.clone()), chain);
     // Fast rules for the test: no pause between payments, ten seconds of grace.
     cfg.params = Params { cooldown_secs: 0, grace_secs: 10, ..cfg.params };
+    // The tests jump through time on purpose: no "back from a sleep" here, unless a test asks.
+    cfg.max_tick_gap_secs = None;
     cfg.provider = provider.map(|p| (p.p.node_id(), p.addr.clone()));
     tweak(&mut cfg);
     Peer { p: Party::start(cfg.clone()).expect("node starts"), addr, name, cfg }
@@ -224,6 +226,20 @@ fn gold_balance_over_lightning() {
     let q4 = quotes(100_000.0, None, sat);
     let p4 = SatsPerMenger::from_usd(100_000.0, 4_534.95).unwrap();
     tick_until(&mut [&mut saver, &mut provider], &q4, sat, 60, "weekend", |n| at_par(n[0], n[1], p4, sat));
+
+    println!("7b. L'épargnant clôt sa position alors qu'il doit quelques sats : il les paie d'abord, puis la clôture passe.");
+    // Bitcoin up 0.08 %: less than the tolerance, so nobody paid, but the saver owes a little.
+    let t6 = sat + 60;
+    let q6 = quotes(100_080.0, None, t6);
+    saver.p.release(None, &q6, t6).unwrap();
+    tick_until(&mut [&mut saver, &mut provider], &q6, t6, 60, "position closed", |n| {
+        n[0].p.position().is_none() && n[0].p.pending().is_none() && n[1].p.position_with(&pk_s).is_none()
+    });
+    assert!(said(&provider, "règle d'abord"), "refused first, for the debt");
+    assert!(said(&saver, "payés au fournisseur pour clore la position"));
+    saver.p.stabilize(stable, &q6, t6 + 1).unwrap();
+    tick_until(&mut [&mut saver, &mut provider], &q6, t6 + 1, 60, "a new position", |n| agreed(n[0], n[1]).is_some());
+    let micro = saver.p.position().unwrap().micro_at_start;
 
     println!("8. Le fournisseur cesse de payer pendant une baisse : l'épargnant ferme ses canaux.");
     let t5 = sat + 3_600;
@@ -476,11 +492,16 @@ fn a_provider_that_goes_away_and_a_saver_that_leaves() {
     let p1 = SatsPerMenger::from_usd(90_000.0, 4_319.0).unwrap();
     wait_for(30, "the saver sees its provider gone", || !saver.p.reachable(&pk_p));
     for later in [0, 11, 3_600] {
+        // The hour without a tick is a computer that slept: the provider's delay starts again.
+        saver.p.cfg.max_tick_gap_secs = (later == 3_600).then_some(300);
         let r = saver.p.tick(&quotes(90_000.0, Some(4_319.0), t1 + later), t1 + later).unwrap();
         assert!(matches!(action(&r), Action::Await { .. }), "after {later} s: {:?}", action(&r));
     }
+    saver.p.cfg.max_tick_gap_secs = None;
+    assert!(said(&saver, "les délais repartent de zéro"));
     let seen = saver.p.peer(&pk_p).unwrap();
-    assert!(seen.closed.is_none() && seen.unreachable_since == Some(t1));
+    assert!(seen.closed.is_none() && seen.unreachable_since == Some(t1 + 3_600));
+    assert_eq!(seen.owed_to_us_since, Some(t1 + 3_600));
     assert_eq!(saver.p.channels_all(&pk_p).len(), 2, "both channels are still there");
     assert_eq!(saver.p.position(), Some(&stable));
     assert!(saver.p.stabilize(10_000, &q1, t1).unwrap_err().to_string().contains("injoignable"));

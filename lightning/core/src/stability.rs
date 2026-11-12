@@ -289,8 +289,9 @@ pub fn adjust(current: Option<&Position>, at: i64, delta_micro: i64, delta_backi
     };
     let micro = (micro as i128 + delta_micro as i128).clamp(0, u64::MAX as i128) as u64;
     let backing = (backing as i128 + delta_backing as i128).clamp(0, u64::MAX as i128) as u64;
-    let position = Position { micro_at_start: micro, started_at: at, rate_ppm_per_year: rate, backing_sats: backing };
-    (!position.is_empty()).then_some(position)
+    // No Mengers left: the position is over, whatever the books still say about its backing (the
+    // two sides can differ by a stability payment that was on its way when the change was asked).
+    (micro > 0).then_some(Position { micro_at_start: micro, started_at: at, rate_ppm_per_year: rate, backing_sats: backing })
 }
 
 /// What a provider accepts when a saver asks to change its position.
@@ -341,21 +342,42 @@ pub fn adjust_limit(delta_backing: i64, own_price: SatsPerMenger, slack_ppm: u64
     }
 }
 
+/// Why a provider refuses a change, and, when the reason is a debt, how much the saver must pay
+/// first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    pub reason: String,
+    /// Satoshis the saver owes at the provider's price and must pay before the position can end.
+    pub owed_sats: u64,
+}
+
+impl From<String> for Refusal {
+    fn from(reason: String) -> Self {
+        Refusal { reason, owed_sats: 0 }
+    }
+}
+
+impl From<&str> for Refusal {
+    fn from(reason: &str) -> Self {
+        Refusal { reason: reason.to_string(), owed_sats: 0 }
+    }
+}
+
 /// Provider: prices a requested change with its own price and returns the change in
 /// micro-Mengers, or the reason it refuses.
 ///
 /// Satoshis coming in are counted for no more Mengers than they are worth, satoshis going out
 /// for no fewer: at the provider's own price, what the saver owes it never shrinks. Taking out
-/// the whole backing ends the position, which the provider accepts only while the saver owes it
-/// no more than the usual tolerance.
+/// the whole backing ends the position, which the provider accepts only once the saver owes it
+/// nothing: a debt, however small, is paid first. (Forgiving small debts at the end would let a
+/// saver end and reopen its position at every small rise of bitcoin, and never pay for any.)
 pub fn quote_adjust(
     current: Option<&Position>,
     req: &AdjustRequest,
     own_price: SatsPerMenger,
     now: i64,
     rules: &AdjustRules,
-    params: &Params,
-) -> Result<i64, String> {
+) -> Result<i64, Refusal> {
     if req.at.saturating_sub(now).saturating_abs() > rules.max_clock_skew_secs {
         return Err("heure de la demande trop éloignée de la nôtre".into());
     }
@@ -367,7 +389,7 @@ pub fn quote_adjust(
             return Err("le prix de la stabilité ne change pas en cours de route".into())
         }
         None if req.rate_ppm_per_year < rules.min_rate_ppm_per_year => {
-            return Err(format!("prix de la stabilité trop bas (minimum {} ppm par an)", rules.min_rate_ppm_per_year))
+            return Err(format!("prix de la stabilité trop bas (minimum {} ppm par an)", rules.min_rate_ppm_per_year).into())
         }
         _ => {}
     }
@@ -376,11 +398,11 @@ pub fn quote_adjust(
         return Err("montant invalide".into());
     }
     let spread = rules.spread_ppm.min(1_000_000) as u128;
-    let beyond_limit = || "notre prix est trop éloigné du tien pour ce changement".to_string();
+    let beyond_limit = || Refusal::from("notre prix est trop éloigné du tien pour ce changement");
 
     if req.delta_backing > 0 {
         if sats < rules.min_increase_sats {
-            return Err(format!("montant trop petit (minimum {} sats)", rules.min_increase_sats));
+            return Err(format!("montant trop petit (minimum {} sats)", rules.min_increase_sats).into());
         }
         let granted = (own_price.micro_for_floor(sats) as u128 * (1_000_000 - spread) / 1_000_000) as u64;
         let room = u64::MAX - current.map_or(0, |p| p.micro_mengers(req.at));
@@ -402,12 +424,16 @@ pub fn quote_adjust(
         return Err("montant invalide".into());
     }
     if sats == position.backing_sats {
-        // Nothing would be left behind the promise: the position ends, and with it whatever one
-        // side still owed the other. The saver's limit protects the saver; this protects us.
-        let target = own_price.sats_for(micro);
-        let tolerance = ppm(target, params.threshold_ppm).max(params.min_payment_sats);
-        if position.backing_sats > target.saturating_add(tolerance) {
-            return Err("ces sats valent plus que tes Mengers : règle d'abord ce que tu dois".into());
+        // Nothing would be left behind the promise: the position ends. All the Mengers go, for
+        // no more satoshis than they are worth to us, our margin taken off like on any other
+        // change. Whatever the saver holds beyond that, it owes: it pays first.
+        let worth = (own_price.sats_for_floor(micro) as u128 * 1_000_000 / (1_000_000 + spread)) as u64;
+        if position.backing_sats > worth {
+            let owed_sats = position.backing_sats - worth;
+            return Err(Refusal {
+                reason: format!("pour clore ta position, règle d'abord les {owed_sats} sats que tu dois"),
+                owed_sats,
+            });
         }
         if micro > req.limit_micro {
             return Err(beyond_limit());
@@ -620,6 +646,14 @@ mod tests {
     }
 
     #[test]
+    fn a_position_without_mengers_is_over() {
+        // A stability payment on its way when the change was asked leaves a few satoshis on the
+        // books of one side: the position ends all the same, on both sides.
+        let pos = position(2);
+        assert_eq!(adjust(Some(&pos), T0, -(2 * MICRO_PER_MENGER as i64), -(pos.backing_sats as i64) + 300, 0), None);
+    }
+
+    #[test]
     fn adjustments_open_grow_shrink_and_end() {
         let open = adjust(None, T0, 2 * MICRO_PER_MENGER as i64, 984_510, 20_000).unwrap();
         assert_eq!(open, Position { micro_at_start: 2 * MICRO_PER_MENGER, started_at: T0, rate_ppm_per_year: 20_000, backing_sats: 984_510 });
@@ -638,8 +672,8 @@ mod tests {
         AdjustRequest { at: T0, delta_backing, limit_micro, rate_ppm_per_year: 0 }
     }
 
-    fn quote(current: Option<&Position>, req: &AdjustRequest, price: SatsPerMenger) -> Result<i64, String> {
-        quote_adjust(current, req, price, T0, &AdjustRules::default(), &Params::default())
+    fn quote(current: Option<&Position>, req: &AdjustRequest, price: SatsPerMenger) -> Result<i64, Refusal> {
+        quote_adjust(current, req, price, T0, &AdjustRules::default())
     }
 
     #[test]
@@ -713,7 +747,18 @@ mod tests {
         // Bitcoin rose 3 %: the saver holds more than its Mengers are worth and owes the
         // difference. It cannot walk away with it by ending the position...
         let up = SatsPerMenger(P0.0 * 100 / 103);
-        assert!(quote(Some(&pos), &request(all, u64::MAX), up).unwrap_err().contains("règle d'abord"));
+        let refusal = quote(Some(&pos), &request(all, u64::MAX), up).unwrap_err();
+        assert_eq!(refusal.owed_sats, pos.backing_sats - up.sats_for_floor(2 * MICRO_PER_MENGER));
+        // Once it has paid what it owes, it can go.
+        let mut paid = pos.clone();
+        apply_payment(&mut paid, refusal.owed_sats, false);
+        let all_paid = -(paid.backing_sats as i64);
+        assert_eq!(quote(Some(&paid), &request(all_paid, u64::MAX), up), Ok(-(2 * MICRO_PER_MENGER as i64)));
+        // Even a debt smaller than the tolerance is paid first: otherwise a saver could end its
+        // position at every small rise of bitcoin, reopen it, and never pay for one.
+        let tiny = SatsPerMenger(P0.0 * 10_000 / 10_005);
+        let refusal = quote(Some(&pos), &request(all, u64::MAX), tiny).unwrap_err();
+        assert!(refusal.owed_sats > 0 && refusal.owed_sats < 1_000);
         // ...nor by taking out more satoshis than its Mengers are worth and leaving the rest.
         let most = -(up.sats_for(2 * MICRO_PER_MENGER) as i64) - 1_000;
         assert!(quote(Some(&pos), &request(most, u64::MAX), up).is_err());
@@ -728,13 +773,13 @@ mod tests {
         let ok = request(500_000, 0);
         assert!(quote(None, &ok, P0).is_ok());
         // A stale request, a rate change, a rate out of bounds, too small an amount.
-        assert!(quote_adjust(None, &ok, P0, T0 + 3_600, &AdjustRules::default(), &Params::default()).is_err());
+        assert!(quote_adjust(None, &ok, P0, T0 + 3_600, &AdjustRules::default()).is_err());
         let pos = position(2);
         assert!(quote(Some(&pos), &AdjustRequest { rate_ppm_per_year: 10_000, ..ok.clone() }, P0).is_err());
         assert!(quote(None, &AdjustRequest { rate_ppm_per_year: MAX_RATE_PPM_PER_YEAR + 1, ..ok.clone() }, P0).is_err());
         assert!(quote(None, &AdjustRequest { rate_ppm_per_year: i64::MIN, ..ok.clone() }, P0).is_err());
         let rules = AdjustRules { min_rate_ppm_per_year: 1, ..AdjustRules::default() };
-        assert!(quote_adjust(None, &ok, P0, T0, &rules, &Params::default()).is_err());
+        assert!(quote_adjust(None, &ok, P0, T0, &rules).is_err());
         assert!(quote(None, &request(999, 0), P0).is_err());
     }
 
@@ -742,10 +787,10 @@ mod tests {
     fn the_provider_s_margin() {
         let rules = AdjustRules { spread_ppm: 2_000, ..AdjustRules::default() }; // 0.2 %
         let worth = P0.micro_for_floor(500_000) as i64;
-        let granted = quote_adjust(None, &request(500_000, 0), P0, T0, &rules, &Params::default()).unwrap();
+        let granted = quote_adjust(None, &request(500_000, 0), P0, T0, &rules).unwrap();
         assert_eq!(granted, worth * 998 / 1_000);
         let pos = position(2);
-        let taken = quote_adjust(Some(&pos), &request(-500_000, u64::MAX), P0, T0, &rules, &Params::default()).unwrap();
+        let taken = quote_adjust(Some(&pos), &request(-500_000, u64::MAX), P0, T0, &rules).unwrap();
         assert!(-taken > worth && -taken <= worth * 1_002 / 1_000 + 2);
     }
 
@@ -866,7 +911,8 @@ mod tests {
         }
 
         // Whatever a saver asks, an accepted change never lowers what the saver owes the provider
-        // at the provider's own price; ending a position is accepted only within the tolerance.
+        // at the provider's own price; a position ends only once the saver owes nothing. A
+        // refusal for a debt names it, and paying it is enough.
         // And an accepted answer always passes the saver's own check.
         #[test]
         fn an_accepted_change_never_costs_the_provider(
@@ -905,12 +951,20 @@ mod tests {
                 rate_ppm_per_year: rate,
             };
             let rules = AdjustRules { spread_ppm: spread, min_rate_ppm_per_year: i64::MIN, min_increase_sats: 1, ..AdjustRules::default() };
-            let params = Params::default();
             let claim = |p: Option<&Position>| match p {
                 Some(p) => p.backing_sats as i128 - price.sats_for(p.micro_mengers(T0)) as i128,
                 None => 0,
             };
-            if let Ok(dm) = quote_adjust(current, &req, price, T0, &rules, &params) {
+            let verdict = quote_adjust(current, &req, price, T0, &rules);
+            if let (Err(r), Some(p)) = (&verdict, current) {
+                if r.owed_sats > 0 {
+                    let mut paid = p.clone();
+                    apply_payment(&mut paid, r.owed_sats, false);
+                    let all = AdjustRequest { delta_backing: -(paid.backing_sats as i64), limit_micro: u64::MAX, ..req.clone() };
+                    prop_assert!(paid.backing_sats == 0 || quote_adjust(Some(&paid), &all, price, T0, &rules).is_ok());
+                }
+            }
+            if let Ok(dm) = verdict {
                 prop_assert_eq!(check_reply(&req, dm), Ok(()));
                 let after = adjust(current, T0, dm, req.delta_backing, rate);
                 let before = claim(current);
@@ -919,11 +973,7 @@ mod tests {
                         prop_assert!(claim(after.as_ref()) >= before, "claim {} -> {}", before, claim(after.as_ref()));
                         prop_assert!(p.micro_at_start > 0 && p.backing_sats > 0, "nothing half-empty is left behind");
                     }
-                    None => {
-                        let target = price.sats_for(pos.micro_mengers(T0));
-                        let tolerance = ppm(target, params.threshold_ppm).max(params.min_payment_sats);
-                        prop_assert!(before <= tolerance as i128);
-                    }
+                    None => prop_assert!(before <= 0, "a position ended with {} sats owed", before),
                 }
             }
         }
@@ -956,8 +1006,8 @@ mod tests {
             };
             let _ = decide(&s, &Params::default());
             let req = AdjustRequest { at, delta_backing: delta, limit_micro: limit, rate_ppm_per_year: rate };
-            let _ = quote_adjust(Some(&pos), &req, price, now, &AdjustRules::default(), &Params::default());
-            let _ = quote_adjust(None, &req, price, now, &AdjustRules::default(), &Params::default());
+            let _ = quote_adjust(Some(&pos), &req, price, now, &AdjustRules::default());
+            let _ = quote_adjust(None, &req, price, now, &AdjustRules::default());
             let _ = check_reply(&req, dm);
             let _ = adjust_limit(delta, price, limit);
             let _ = adjust(Some(&pos), at, dm, delta, rate);

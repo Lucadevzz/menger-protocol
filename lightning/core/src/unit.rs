@@ -39,6 +39,13 @@ impl SatsPerMenger {
         v.min(u64::MAX as u128) as u64
     }
 
+    /// Satoshis worth `micro` micro-Mengers at this price, rounded down: never more than they are
+    /// worth.
+    pub fn sats_for_floor(self, micro: u64) -> u64 {
+        let v = micro as u128 * self.0 as u128 / MICRO_PER_MENGER as u128;
+        v.min(u64::MAX as u128) as u64
+    }
+
     /// Micro-Mengers worth `sats` satoshis at this price, rounded to the nearest micro-Menger.
     pub fn micro_for(self, sats: u64) -> u64 {
         if self.0 == 0 {

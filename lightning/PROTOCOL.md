@@ -87,13 +87,14 @@ tolerance = max(target × threshold, min_payment)
 ```
 
 1. **Coverage (saver only).** `reserve` = what the provider could still send over all open
-   channels, less what it owes now. `coverage = reserve / (reserve + target)`: the largest fall of
+   channels (a payment from it still on its way counts as its own), less what it owes now. `coverage = reserve / (reserve + target)`: the largest fall of
    bitcoin against gold the provider can still pay for. Below `close_coverage`, the saver leaves.
    Below `warn_coverage` it warns its owner. This is read from the channels' state and does not
    depend on the provider being connected.
 2. **Backing (provider only).** If the saver holds, in the channels, less than `backing_sats` by
-   more than `min_payment` (measured when no payment is in flight between them), the provider
-   pays nothing and treats the missing amount as owed to it: it waits, then leaves (rule 5).
+   more than `min_payment` (measured when no payment is in flight between them, or when payments
+   have been in flight without a pause for 10 minutes: a payment held open on purpose must not
+   hide that the bitcoin left), the provider pays nothing and treats the missing amount as owed to it: it waits, then leaves (rule 5).
 3. If `owed < tolerance`: do nothing.
 4. **The party that owes pays**, unless one of its own stability payments is still in flight, or
    it paid less than `cooldown` ago, or the other party cannot be reached. It pays
@@ -108,6 +109,10 @@ tolerance = max(target × threshold, min_payment)
 
    At the deadline, if it is still owed at least `max(target × close_owed, tolerance)` (or, for
    rule 2, if the backing is still missing), it leaves.
+
+   **A party that slept** (two of its ticks more than 5 minutes apart: a computer asleep, a
+   program stopped) forgets `since` and `back` for every counterparty: the delays start again from
+   its return, since the other party could not have paid it, nor be heard, meanwhile.
 
 | Parameter | Default | Meaning |
 |---|---|---|
@@ -128,7 +133,7 @@ opens it) or takes satoshis out.
 
 ```
 saver    → provider   Adjust { at, delta_backing, limit_micro, rate_ppm_per_year }
-provider → saver      Reply  { at, accepted, delta_micro, reason }
+provider → saver      Reply  { at, accepted, delta_micro, reason, owed_sats }
 ```
 
 - `at`: Unix time chosen by the saver; identifies the request, and is the time from which the
@@ -152,9 +157,10 @@ otherwise answers with `delta_micro`, computed at its own price `P`, with `sprea
    cover a smaller fall than it requires (30 %). Otherwise `delta_micro = granted`.
 3. Shrinking by `s` satoshis, with `M = micro(at)`:
    - no position, or `s > backing_sats`;
-   - `s = backing_sats` (everything leaves; the position ends): refused if
-     `backing_sats > sats_for(M) + tolerance` (the saver must first pay what it owes) or if
-     `M > limit_micro`; otherwise `delta_micro = −M`;
+   - `s = backing_sats` (everything leaves; the position ends): with
+     `worth = floor(sats_floor(M) / (1 + spread))`, refused if `backing_sats > worth`, with
+     `owed_sats = backing_sats − worth` (the saver must first pay what it owes, however little), or
+     if `M > limit_micro`; otherwise `delta_micro = −M`;
    - `s < backing_sats`: `taken = ceil(micro_ceil(s) × (1 + spread))`; refused if `taken ≥ M` or
      `taken > limit_micro`; otherwise `delta_micro = −taken`.
 
@@ -162,23 +168,32 @@ The provider also refuses when it has no price of its own, or while its channels
 are closing.
 
 At the provider's own price, an accepted change never lowers what the saver owes it (growing is
-rounded down, shrinking up), except that ending a position forgives a debt no larger than the
-tolerance.
+rounded down, shrinking up), and a position ends only once the saver owes it nothing. Forgiving
+small debts at the end would let a saver end its position at each small rise of bitcoin, reopen
+it, and never pay for one.
+
+**Ending with a debt.** A refusal with `owed_sats > 0` tells the saver what to pay. The reference
+saver, when it asked to end its position and `owed_sats` is no more than what it owes at its own
+price plus its slack and `min_payment`, sends a stability payment of `owed_sats`, then asks again
+once it has arrived; twice at most.
 
 **Applying a change**, on both sides and with the same numbers:
 `micro_at_start ← micro(at) + delta_micro`, `started_at ← at`, `backing_sats ← backing_sats +
 delta_backing` (the rate is set when the position opens and never changes). Each side adds the
 change to what it has recorded, so a stability payment that crosses the request is not lost. A
-position with zero Mengers and zero backing no longer exists.
+position with zero Mengers no longer exists, whatever backing the books still show (a stability
+payment that crossed the request can leave a few satoshis on one side).
 
 **The saver** checks an accepting reply: growing, `delta_micro > 0` and
 `delta_micro ≥ limit_micro`; shrinking, `delta_micro < 0` and `|delta_micro| ≤ limit_micro`. A reply outside those bounds means the provider did something else
 than what was asked: the saver leaves.
 
 **Delivery.** The saver writes a request down before sending it and sends it again, unchanged,
-every 60 s until it is answered. The provider stores its answer before sending it; when the same
-`at` comes again it sends the same answer; an older `at` is ignored. A request is therefore
-applied once on each side or on neither.
+until it is answered: after 60 s, then twice as long each time, up to an hour. It does not ask at
+all while the provider has nothing on its side of the channels (its reply travels with a payment).
+The provider stores its answer before sending it; when the same `at` comes again it sends the same
+answer; an older `at` gets a refusal. A request is therefore applied once on each side or on
+neither.
 
 ## 7. Messages
 
@@ -196,7 +211,7 @@ parties: the channel is the only link, there is no server.
 | `kind` | Other fields |
 |---|---|
 | `adjust` | `at`, `delta_backing`, `limit_micro`, `rate_ppm_per_year` |
-| `reply` | `at`, `accepted`, `delta_micro` (0 when refused), `reason` (text or null) |
+| `reply` | `at`, `accepted`, `delta_micro` (0 when refused), `reason` (text or null), `owed_sats` (only when not zero) |
 | `stability` | `sats_per_menger` (the payer's price), `backing_after` (the saver's backing after this payment, as the payer computes it); both are informative |
 
 **Signature.** `sig` is the sender's signature, with its node key, in the format of Lightning's
@@ -231,7 +246,10 @@ through its provider.
    also the routing-fee limit given to the payment.
 2. Free satoshis are used first. For what is missing, the saver first asks the provider to shrink
    the position (section 6); the payment leaves only once the reply is in.
-3. A payment that has not left after 5 minutes (no reply), or whose invoice expires, is given up.
+3. One thing at a time: no payment while a request to the provider is waiting for its answer,
+   and no request that grows the position while a payment is in progress (both could count the
+   same free satoshis). An invoice whose hash the node already knows is refused.
+4. A payment that has not left after 5 minutes (no reply), or whose invoice expires, is given up.
    Satoshis released for a payment that failed or was given up, and the part of the margin that
    was not spent, go back into the position automatically.
 

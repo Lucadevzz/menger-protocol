@@ -16,6 +16,10 @@ pub const STATE_VERSION: u32 = 3;
 pub struct InFlight {
     pub payment_id: String,
     pub sats: u64,
+    /// When it was written down. The node records a payment only once it has left: until a
+    /// little after this, not finding it does not mean it never left.
+    #[serde(default)]
+    pub sent_at: i64,
 }
 
 /// Saver: a change of position sent to the provider and not answered yet. It is sent again,
@@ -40,6 +44,9 @@ pub struct PendingAdjust {
     /// Releases satoshis for a payment to someone else.
     #[serde(default)]
     pub for_spend: bool,
+    /// How many times it was sent again. Each time, the next try waits twice as long.
+    #[serde(default)]
+    pub attempts: u32,
 }
 
 /// Provider: the last answer given to a saver, sent again if the same request comes back.
@@ -51,6 +58,9 @@ pub struct Answer {
     #[serde(default)]
     pub delta_micro: i64,
     pub reason: Option<String>,
+    /// Refused for a debt: what the saver must pay first.
+    #[serde(default)]
+    pub owed_sats: u64,
 }
 
 /// Saver: a payment to someone else, paid once the position has released the satoshis it needs.
@@ -96,6 +106,11 @@ pub struct PeerState {
     pub force_closed: bool,
     /// Provider: we already opened a channel in return for this saver's.
     pub return_opened: bool,
+    /// Since when payments have been under way in the channels without a pause.
+    pub htlcs_since: Option<i64>,
+    /// Saver: the provider asked us to pay what we owe before our position can end; once paid,
+    /// we ask again. Counts the tries left.
+    pub exit_tries_left: u8,
 }
 
 /// One line of the audit trail.
@@ -123,6 +138,8 @@ pub struct State {
     pub gold: Option<GoldMemory>,
     /// Hashes of the incoming payments already counted, so that a replayed event is not counted twice.
     pub seen_payments: Vec<String>,
+    /// Time of the last tick. A long gap means the computer slept: delays start again.
+    pub last_tick_at: Option<i64>,
     /// The most recent events, newest last.
     pub journal: Vec<Entry>,
 }
@@ -148,8 +165,15 @@ impl State {
             Ok(Some(state)) => state,
             Ok(None) => read(&backup)?.unwrap_or_default(),
             Err(e) => match read(&backup) {
-                Ok(Some(state)) => {
-                    eprintln!("{e:#} ; état relu depuis {}", backup.display());
+                Ok(Some(mut state)) => {
+                    eprintln!("ATTENTION : {e:#} ; état relu depuis la copie {}", backup.display());
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs() as i64);
+                    state.note(
+                        now,
+                        "ATTENTION : le fichier d'état était abîmé, la copie précédente a été relue : la toute dernière opération peut manquer",
+                    );
                     state
                 }
                 _ => return Err(e),
