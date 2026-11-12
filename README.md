@@ -1,5 +1,7 @@
 # Menger v0, prototype
 
+[![tests](https://github.com/Lucadevzz/menger-protocol/actions/workflows/tests.yml/badge.svg)](https://github.com/Lucadevzz/menger-protocol/actions/workflows/tests.yml)
+
 Une monnaie stable en or, sans réserve d'or ni émetteur. **1 Menger = 3,545 g d'or fin**, le poids du ducat vénitien (1284-1797).
 
 Le nom rend hommage à Carl Menger, le fondateur de l'école autrichienne. En 1892, dans *On the Origin of Money*, il a montré que la monnaie naît des échanges, sans l'État : le bien le plus facile à échanger s'impose, et c'est historiquement un métal précieux comme l'or. Et l'unité pèse un ducat : c'est le nom que Hayek donnait à la monnaie privée de son exemple, dans *Denationalisation of Money* (1976). Le Menger, c'est ce ducat-là, sans banque.

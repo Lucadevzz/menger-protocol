@@ -2,7 +2,7 @@
 
 Un solde qui garde sa valeur en or, **1 Menger = 3,545 g d'or fin**, réglé en bitcoin dans des canaux Lightning. On peut le garder, le payer à quelqu'un et en recevoir, depuis une application simple dans le navigateur. Chacun garde ses clés et ses propres bitcoins. Il n'y a ni jeton, ni pont, ni émetteur, ni administrateur, ni oracle commun.
 
-> **Prototype de recherche, non audité.** Testé de bout en bout sur un réseau Bitcoin privé, avec de vrais nœuds Lightning. Il n'a pas encore tourné sur un réseau public. N'y mets jamais de vrais bitcoins avant une relecture par un développeur Bitcoin.
+> **Prototype de recherche, non audité.** Testé de bout en bout sur un réseau Bitcoin privé, avec de vrais nœuds Lightning. Il n'a pas encore tourné sur un réseau public. N'y mets jamais de vrais bitcoins avant une relecture par un développeur Bitcoin : le programme refuse d'ailleurs le vrai réseau, sauf si on le force.
 
 ## Comment ça marche
 

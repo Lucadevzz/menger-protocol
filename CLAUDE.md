@@ -55,7 +55,7 @@ Dans le bac à sable de Claude :
 - `forge` : `npm install @foundry-rs/forge` (le binaire est dans `node_modules/@foundry-rs/forge-linux-amd64/bin`). Le compilateur Solidity 0.6.11 se télécharge depuis les « releases » GitHub d'`ethereum/solidity` (`solc-static-linux`), à placer dans `~/.svm/0.6.11/solc-0.6.11` ; puis `forge test --offline`. `binaries.soliditylang.org` est bloqué.
 - Les requêtes HTTP passent par le proxy défini dans `HTTPS_PROXY`. `bitcoincore.org` et `static.rust-lang.org` sont bloqués ; `git clone` de dépôts publics et `raw.githubusercontent.com` passent.
 - Le disque est limité : `cargo clean` si la place manque (les dépendances sont compilées sans informations de débogage pour rester petites).
-- L'API GitHub des « Actions » n'est pas accessible : demander à Matteo si la coche est verte.
+- Pour savoir si les tests passent sur GitHub après un envoi : `gh api repos/Lucadevzz/menger-protocol/commits/SHA/check-runs` (le reste de l'API des « Actions » n'est pas accessible).
 
 ## Prochaines étapes
 

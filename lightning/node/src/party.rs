@@ -1173,16 +1173,22 @@ impl Party {
             peer
         };
 
-        // Can a payment reach this party right now?
+        // Can a payment reach this party right now? A channel that is still opening is not an
+        // absence: there is nothing to reach yet.
         let online = channels.iter().any(|c| c.is_usable);
+        let open = channels.iter().any(|c| c.is_channel_ready);
         let p = self.peer_mut(&peer_key);
         if online {
             if p.unreachable_since.take().is_some() || p.reachable_since.is_none() {
                 p.reachable_since = Some(now);
             }
         } else {
-            p.unreachable_since.get_or_insert(now);
             p.reachable_since = None;
+            if open {
+                p.unreachable_since.get_or_insert(now);
+            } else {
+                p.unreachable_since = None;
+            }
         }
         let online_since = p.reachable_since;
 

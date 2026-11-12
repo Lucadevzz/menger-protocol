@@ -137,6 +137,10 @@ struct RunArgs {
     /// Adresse de l'application dans le navigateur, sur cet ordinateur ; `aucune` pour s'en passer.
     #[arg(long, default_value = "127.0.0.1:8421")]
     interface: String,
+    /// Accepte de tourner sur le vrai réseau Bitcoin (`--network bitcoin`). Le programme est un
+    /// prototype non audité : sans cette option, il refuse.
+    #[arg(long)]
+    vrais_bitcoins_a_mes_risques: bool,
     /// Restaure un portefeuille depuis sa phrase de récupération, dans un dossier neuf. La phrase est
     /// demandée au démarrage, pour qu'elle ne reste pas dans l'historique du terminal.
     #[arg(long)]
@@ -370,6 +374,13 @@ fn run(a: RunArgs) -> Result<()> {
         NetworkArg::Bitcoin => Network::Bitcoin,
     };
     if network == Network::Bitcoin {
+        if !a.vrais_bitcoins_a_mes_risques {
+            bail!(
+                "ce programme est un prototype non audité, construit sur une version de développement de LDK Node : \
+                 il refuse le vrai réseau Bitcoin. Essaie-le sur un réseau de test (--network signet). \
+                 Pour passer outre, en sachant que tu peux tout perdre : --vrais-bitcoins-a-mes-risques"
+            );
+        }
         eprintln!("ATTENTION : vrai réseau Bitcoin. Code non audité : n'y mets que ce que tu peux perdre.");
     }
     let chain = match (&a.esplora, &a.bitcoind_rpc) {
