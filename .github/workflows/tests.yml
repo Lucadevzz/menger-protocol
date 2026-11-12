@@ -1,0 +1,55 @@
+# Runs every test of the project at each change: the Ethereum version (Foundry) and the Bitcoin
+# version (Rust), including the end-to-end tests on a private Bitcoin network.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ethereum:
+    name: Version Ethereum
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
+      - name: Tests (71)
+        run: forge test
+
+  lightning:
+    name: Version Bitcoin (Lightning)
+    runs-on: ubuntu-latest
+    env:
+      # Bitcoin Core for the end-to-end tests. The checksum is the one attested by the release's
+      # builders (https://github.com/bitcoin-core/guix.sigs, 30.4/*/all.SHA256SUMS).
+      BITCOIN_VERSION: "30.4"
+      BITCOIN_SHA256: 051a18c595d9a27df23cb7187ff9fb343e90943cb142af751e12787806500c3d
+    defaults:
+      run:
+        working-directory: lightning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: lightning
+      - name: Relecture automatique (clippy)
+        run: cargo clippy --workspace --all-targets
+      - name: Règles, sources de prix, application
+        run: cargo test --workspace
+      - name: Bitcoin Core
+        run: |
+          curl -sSfL -o /tmp/bitcoin.tar.gz "https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz"
+          echo "${BITCOIN_SHA256}  /tmp/bitcoin.tar.gz" | sha256sum --check
+          tar -xzf /tmp/bitcoin.tar.gz -C /tmp
+      - name: Bout en bout, sur un réseau Bitcoin privé
+        run: BITCOIND_EXE="/tmp/bitcoin-${BITCOIN_VERSION}/bin/bitcoind" cargo test -p menger-ln --test regtest
